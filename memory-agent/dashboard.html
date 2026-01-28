@@ -1,0 +1,1943 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Claude Memory Control Center</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-tertiary: #1a1a25;
+            --bg-card: #16161f;
+            --border-color: #2a2a3a;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-yellow: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #a371f7;
+            --accent-pink: #db61a2;
+            --accent-cyan: #39d4d4;
+            --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-2: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            --gradient-3: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+            --gradient-4: linear-gradient(135deg, #43e97b 0%, #38f9d7 100%);
+            --shadow-glow: 0 0 40px rgba(88, 166, 255, 0.15);
+        }
+
+        body {
+            font-family: 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background */
+        .bg-animation {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+            opacity: 0.5;
+            background:
+                radial-gradient(ellipse at 20% 20%, rgba(88, 166, 255, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 80% 80%, rgba(163, 113, 247, 0.08) 0%, transparent 50%),
+                radial-gradient(ellipse at 50% 50%, rgba(63, 185, 80, 0.05) 0%, transparent 60%);
+        }
+
+        /* Header */
+        .header {
+            background: rgba(18, 18, 26, 0.8);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 32px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-content {
+            max-width: 1800px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--gradient-1);
+            border-radius: 14px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            box-shadow: var(--shadow-glow);
+        }
+
+        .logo-text {
+            font-size: 22px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #fff 0%, #a8b4c4 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .logo-subtitle {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+        }
+
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .project-dropdown {
+            position: relative;
+        }
+
+        .project-btn {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 12px 20px;
+            border-radius: 12px;
+            font-size: 14px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.2s;
+            min-width: 280px;
+        }
+
+        .project-btn:hover {
+            border-color: var(--accent-blue);
+            box-shadow: 0 0 20px rgba(88, 166, 255, 0.1);
+        }
+
+        .project-btn i {
+            color: var(--accent-blue);
+        }
+
+        .project-menu {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            margin-top: 8px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 8px;
+            display: none;
+            max-height: 300px;
+            overflow-y: auto;
+            z-index: 1000;
+        }
+
+        .project-menu.show {
+            display: block;
+            animation: slideDown 0.2s ease;
+        }
+
+        @keyframes slideDown {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .project-item {
+            padding: 12px 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.15s;
+        }
+
+        .project-item:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .project-item.active {
+            background: rgba(88, 166, 255, 0.15);
+            border-left: 3px solid var(--accent-blue);
+        }
+
+        .project-item-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+        }
+
+        .project-item-info {
+            flex: 1;
+        }
+
+        .project-item-name {
+            font-weight: 500;
+            font-size: 14px;
+        }
+
+        .project-item-stats {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(63, 185, 80, 0.1);
+            border: 1px solid rgba(63, 185, 80, 0.3);
+            border-radius: 20px;
+            font-size: 13px;
+            color: var(--accent-green);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            background: var(--accent-green);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(63, 185, 80, 0.4); }
+            50% { opacity: 0.8; box-shadow: 0 0 0 8px rgba(63, 185, 80, 0); }
+        }
+
+        /* Main Content */
+        .main-content {
+            max-width: 1800px;
+            margin: 0 auto;
+            padding: 32px;
+        }
+
+        /* Stats Row */
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 32px;
+        }
+
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-glow);
+            border-color: var(--accent-blue);
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--card-accent, var(--gradient-1));
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            margin-bottom: 16px;
+        }
+
+        .stat-value {
+            font-size: 36px;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .stat-change {
+            position: absolute;
+            top: 24px;
+            right: 24px;
+            font-size: 12px;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+
+        .stat-change.positive {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--accent-green);
+        }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 24px;
+            background: var(--bg-secondary);
+            padding: 6px;
+            border-radius: 14px;
+            width: fit-content;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .tab:hover {
+            color: var(--text-primary);
+            background: var(--bg-tertiary);
+        }
+
+        .tab.active {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        .tab .count {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 12px;
+        }
+
+        .tab.active .count {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        /* Category Filter */
+        .category-filter {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+        }
+
+        .category-chip {
+            padding: 8px 16px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 500;
+            border: 1px solid var(--border-color);
+            background: var(--bg-card);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .category-chip:hover {
+            border-color: var(--text-secondary);
+            color: var(--text-primary);
+        }
+
+        .category-chip.active {
+            border-color: var(--chip-color, var(--accent-blue));
+            background: rgba(88, 166, 255, 0.1);
+            color: var(--chip-color, var(--accent-blue));
+        }
+
+        .category-chip i {
+            font-size: 14px;
+        }
+
+        /* Search Bar */
+        .search-bar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 12px 20px;
+            margin-bottom: 24px;
+            max-width: 400px;
+        }
+
+        .search-bar i {
+            color: var(--text-secondary);
+        }
+
+        .search-bar input {
+            flex: 1;
+            background: none;
+            border: none;
+            color: var(--text-primary);
+            font-size: 14px;
+            outline: none;
+        }
+
+        .search-bar input::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Agent Grid */
+        .agent-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 20px;
+        }
+
+        .agent-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .agent-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+            border-color: var(--border-color);
+        }
+
+        .agent-card.disabled {
+            opacity: 0.5;
+        }
+
+        .agent-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .agent-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+        }
+
+        .agent-toggle {
+            position: relative;
+            width: 52px;
+            height: 28px;
+            background: var(--bg-tertiary);
+            border-radius: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 1px solid var(--border-color);
+        }
+
+        .agent-toggle.active {
+            background: var(--accent-green);
+            border-color: var(--accent-green);
+        }
+
+        .agent-toggle::after {
+            content: '';
+            position: absolute;
+            top: 3px;
+            left: 3px;
+            width: 20px;
+            height: 20px;
+            background: white;
+            border-radius: 50%;
+            transition: all 0.3s;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
+
+        .agent-toggle.active::after {
+            left: 27px;
+        }
+
+        .agent-name {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .agent-description {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.5;
+            margin-bottom: 16px;
+        }
+
+        .agent-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .agent-tag {
+            padding: 4px 10px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+
+        .agent-category-label {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        /* MCP & Hook Cards */
+        .config-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            transition: all 0.2s;
+        }
+
+        .config-card:hover {
+            border-color: var(--accent-blue);
+        }
+
+        .config-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            flex-shrink: 0;
+        }
+
+        .config-info {
+            flex: 1;
+        }
+
+        .config-name {
+            font-weight: 600;
+            font-size: 15px;
+            margin-bottom: 4px;
+        }
+
+        .config-desc {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .config-trigger {
+            font-size: 11px;
+            color: var(--accent-purple);
+            margin-top: 4px;
+        }
+
+        /* Section Headers */
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .section-title i {
+            color: var(--accent-blue);
+        }
+
+        .section-actions {
+            display: flex;
+            gap: 12px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border-radius: 10px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            border: none;
+        }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #4a9aef;
+            box-shadow: 0 4px 15px rgba(88, 166, 255, 0.3);
+        }
+
+        .btn-secondary {
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border-color);
+        }
+
+        /* Tab Content */
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+            animation: fadeIn 0.3s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        /* Timeline Section - Enhanced with Causal Chains */
+        .timeline-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+
+        .timeline-filters {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+
+        .timeline-filter-chip {
+            padding: 6px 14px;
+            border-radius: 16px;
+            font-size: 12px;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .timeline-filter-chip:hover,
+        .timeline-filter-chip.active {
+            border-color: var(--accent-blue);
+            color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.1);
+        }
+
+        .timeline-chain {
+            margin-bottom: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            overflow: hidden;
+            background: var(--bg-secondary);
+        }
+
+        .timeline-request {
+            background: linear-gradient(135deg, rgba(63, 185, 80, 0.15) 0%, rgba(63, 185, 80, 0.05) 100%);
+            border-left: 4px solid var(--accent-green);
+            padding: 16px 20px;
+        }
+
+        .timeline-request-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+
+        .timeline-request-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: rgba(63, 185, 80, 0.2);
+            color: var(--accent-green);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .timeline-request-title {
+            font-weight: 600;
+            font-size: 15px;
+            flex: 1;
+        }
+
+        .timeline-request-time {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .timeline-request-goal {
+            font-size: 13px;
+            color: var(--text-secondary);
+            padding-left: 44px;
+        }
+
+        .timeline-children {
+            padding: 8px 0;
+        }
+
+        .timeline-event {
+            display: flex;
+            gap: 14px;
+            padding: 12px 20px;
+            position: relative;
+            transition: background 0.2s;
+        }
+
+        .timeline-event:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        .timeline-connector {
+            position: absolute;
+            left: 35px;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: var(--border-color);
+        }
+
+        .timeline-event:last-child .timeline-connector {
+            height: 50%;
+        }
+
+        .timeline-dot {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: white;
+        }
+
+        .timeline-content {
+            flex: 1;
+            min-width: 0;
+        }
+
+        .timeline-type-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 3px 10px;
+            border-radius: 12px;
+            margin-bottom: 6px;
+        }
+
+        .timeline-summary {
+            font-size: 14px;
+            margin-bottom: 6px;
+            line-height: 1.5;
+        }
+
+        .timeline-details {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            padding: 8px 12px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+        }
+
+        .timeline-meta {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .timeline-time {
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+
+        .timeline-confidence {
+            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 10px;
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+        }
+
+        .timeline-confidence.high {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--accent-green);
+        }
+
+        .timeline-anchor-badge {
+            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 10px;
+            background: rgba(57, 212, 212, 0.2);
+            color: var(--accent-cyan);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .timeline-outcome-badge {
+            font-size: 10px;
+            padding: 3px 10px;
+            border-radius: 10px;
+            font-weight: 500;
+        }
+
+        .timeline-outcome-badge.success {
+            background: rgba(63, 185, 80, 0.15);
+            color: var(--accent-green);
+        }
+
+        .timeline-outcome-badge.failed {
+            background: rgba(248, 81, 73, 0.15);
+            color: var(--accent-red);
+        }
+
+        /* Event type styling */
+        .dot-user_request { background: var(--accent-green); }
+        .dot-decision { background: var(--accent-purple); }
+        .dot-observation { background: var(--accent-yellow); }
+        .dot-action { background: var(--accent-blue); }
+        .dot-outcome { background: var(--accent-cyan); }
+        .dot-anchor { background: linear-gradient(135deg, var(--accent-cyan), var(--accent-purple)); }
+        .dot-error { background: var(--accent-red); }
+
+        .badge-decision { background: rgba(163, 113, 247, 0.15); color: var(--accent-purple); }
+        .badge-observation { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+        .badge-action { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
+        .badge-outcome { background: rgba(57, 212, 212, 0.15); color: var(--accent-cyan); }
+        .badge-anchor { background: rgba(57, 212, 212, 0.2); color: var(--accent-cyan); }
+        .badge-error { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); }
+
+        .timeline-empty {
+            text-align: center;
+            padding: 60px;
+            color: var(--text-secondary);
+        }
+
+        .timeline-empty i {
+            font-size: 48px;
+            margin-bottom: 16px;
+            opacity: 0.3;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                gap: 16px;
+            }
+
+            .stats-row {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .agent-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .tabs {
+                width: 100%;
+                overflow-x: auto;
+            }
+
+            .category-filter {
+                overflow-x: auto;
+                flex-wrap: nowrap;
+                padding-bottom: 8px;
+            }
+        }
+
+        /* Loading State */
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 60px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Toast Notifications */
+        .toast-container {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            z-index: 1000;
+        }
+
+        .toast {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px 24px;
+            margin-top: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            animation: slideIn 0.3s ease;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.4);
+        }
+
+        .toast.success {
+            border-left: 4px solid var(--accent-green);
+        }
+
+        .toast.error {
+            border-left: 4px solid var(--accent-red);
+        }
+
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(100px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-secondary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--border-color);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="bg-animation"></div>
+
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">
+                    <i class="fas fa-brain"></i>
+                </div>
+                <div>
+                    <div class="logo-text">Claude Memory</div>
+                    <div class="logo-subtitle">Control Center v2.0</div>
+                </div>
+            </div>
+
+            <div class="header-controls">
+                <div class="project-dropdown">
+                    <button class="project-btn" onclick="toggleProjectMenu()">
+                        <i class="fas fa-folder"></i>
+                        <span id="currentProjectName">Select Project</span>
+                        <i class="fas fa-chevron-down" style="margin-left: auto;"></i>
+                    </button>
+                    <div class="project-menu" id="projectMenu"></div>
+                </div>
+
+                <div class="status-indicator" id="statusIndicator">
+                    <span class="status-dot"></span>
+                    <span id="statusText">Connected</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main-content">
+        <!-- Stats Row -->
+        <div class="stats-row">
+            <div class="stat-card" style="--card-accent: var(--gradient-1)">
+                <div class="stat-icon" style="background: rgba(88, 166, 255, 0.15); color: var(--accent-blue);">
+                    <i class="fas fa-robot"></i>
+                </div>
+                <div class="stat-value" id="enabledAgentsCount">0</div>
+                <div class="stat-label">Active Agents</div>
+                <div class="stat-change positive" id="agentsTotalCount">/ 0 total</div>
+            </div>
+
+            <div class="stat-card" style="--card-accent: var(--gradient-4)">
+                <div class="stat-icon" style="background: rgba(63, 185, 80, 0.15); color: var(--accent-green);">
+                    <i class="fas fa-plug"></i>
+                </div>
+                <div class="stat-value" id="enabledMcpsCount">0</div>
+                <div class="stat-label">MCP Servers</div>
+                <div class="stat-change positive" id="mcpsTotalCount">/ 0 total</div>
+            </div>
+
+            <div class="stat-card" style="--card-accent: var(--gradient-2)">
+                <div class="stat-icon" style="background: rgba(163, 113, 247, 0.15); color: var(--accent-purple);">
+                    <i class="fas fa-bolt"></i>
+                </div>
+                <div class="stat-value" id="enabledHooksCount">0</div>
+                <div class="stat-label">Active Hooks</div>
+                <div class="stat-change positive" id="hooksTotalCount">/ 0 total</div>
+            </div>
+
+            <div class="stat-card" style="--card-accent: var(--gradient-3)">
+                <div class="stat-icon" style="background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow);">
+                    <i class="fas fa-brain"></i>
+                </div>
+                <div class="stat-value" id="memoriesCount">0</div>
+                <div class="stat-label">Memories</div>
+            </div>
+
+            <div class="stat-card" style="--card-accent: linear-gradient(135deg, #f85149 0%, #ff7b72 100%)">
+                <div class="stat-icon" style="background: rgba(248, 81, 73, 0.15); color: var(--accent-red);">
+                    <i class="fas fa-clock"></i>
+                </div>
+                <div class="stat-value" id="eventsCount">0</div>
+                <div class="stat-label">Timeline Events</div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs">
+            <div class="tab active" data-tab="agents" onclick="switchTab('agents')">
+                <i class="fas fa-robot"></i>
+                Agents
+                <span class="count" id="agentsTabCount">0</span>
+            </div>
+            <div class="tab" data-tab="mcps" onclick="switchTab('mcps')">
+                <i class="fas fa-plug"></i>
+                MCP Servers
+                <span class="count" id="mcpsTabCount">0</span>
+            </div>
+            <div class="tab" data-tab="hooks" onclick="switchTab('hooks')">
+                <i class="fas fa-bolt"></i>
+                Hooks
+                <span class="count" id="hooksTabCount">0</span>
+            </div>
+            <div class="tab" data-tab="timeline" onclick="switchTab('timeline')">
+                <i class="fas fa-stream"></i>
+                Timeline
+            </div>
+        </div>
+
+        <!-- Agents Tab -->
+        <div class="tab-content active" id="agents-tab">
+            <div class="section-header">
+                <div class="search-bar">
+                    <i class="fas fa-search"></i>
+                    <input type="text" placeholder="Search agents..." id="agentSearch" oninput="filterAgents()">
+                </div>
+                <div class="section-actions">
+                    <button class="btn btn-secondary" onclick="enableAllAgents(false)">
+                        <i class="fas fa-toggle-off"></i>
+                        Disable All
+                    </button>
+                    <button class="btn btn-primary" onclick="enableAllAgents(true)">
+                        <i class="fas fa-toggle-on"></i>
+                        Enable All
+                    </button>
+                </div>
+            </div>
+
+            <div class="category-filter" id="categoryFilter"></div>
+
+            <div class="agent-grid" id="agentGrid">
+                <div class="loading"><div class="spinner"></div></div>
+            </div>
+        </div>
+
+        <!-- MCPs Tab -->
+        <div class="tab-content" id="mcps-tab">
+            <div class="section-header">
+                <div class="section-title">
+                    <i class="fas fa-plug"></i>
+                    MCP Server Configuration
+                </div>
+            </div>
+            <div class="agent-grid" id="mcpGrid">
+                <div class="loading"><div class="spinner"></div></div>
+            </div>
+        </div>
+
+        <!-- Hooks Tab -->
+        <div class="tab-content" id="hooks-tab">
+            <div class="section-header">
+                <div class="section-title">
+                    <i class="fas fa-bolt"></i>
+                    Hook Configuration
+                </div>
+            </div>
+            <div class="agent-grid" id="hookGrid">
+                <div class="loading"><div class="spinner"></div></div>
+            </div>
+        </div>
+
+        <!-- Timeline Tab -->
+        <div class="tab-content" id="timeline-tab">
+            <div class="section-header">
+                <div class="section-title">
+                    <i class="fas fa-stream"></i>
+                    Recent Timeline Events
+                </div>
+                <button class="btn btn-secondary" onclick="loadTimeline()">
+                    <i class="fas fa-sync"></i>
+                    Refresh
+                </button>
+            </div>
+            <div class="timeline-container" id="timelineContainer">
+                <div class="loading"><div class="spinner"></div></div>
+            </div>
+        </div>
+    </main>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        const API_URL = 'http://localhost:8102';
+        let currentProject = null;
+        let projectConfig = null;
+        let allAgents = [];
+        let allMcps = [];
+        let allHooks = [];
+        let categories = {};
+        let activeCategory = 'all';
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadProjects();
+            await loadAgentData();
+            await loadStats();
+        });
+
+        // Project Management
+        async function loadProjects() {
+            try {
+                const response = await fetch(`${API_URL}/api/projects`);
+                const data = await response.json();
+
+                const menu = document.getElementById('projectMenu');
+                menu.innerHTML = '';
+
+                if (!data.success || !data.projects.length) {
+                    menu.innerHTML = '<div class="project-item"><span>No projects found</span></div>';
+                    return;
+                }
+
+                const colors = ['#58a6ff', '#3fb950', '#a371f7', '#d29922', '#f85149'];
+
+                data.projects.forEach((project, index) => {
+                    const name = project.project_path.split(/[/\\]/).pop();
+                    const color = colors[index % colors.length];
+
+                    const item = document.createElement('div');
+                    item.className = 'project-item';
+                    item.onclick = () => selectProject(project.project_path);
+                    item.innerHTML = `
+                        <div class="project-item-icon" style="background: ${color}20; color: ${color};">
+                            <i class="fas fa-folder"></i>
+                        </div>
+                        <div class="project-item-info">
+                            <div class="project-item-name">${name}</div>
+                            <div class="project-item-stats">${project.session_count || 0} sessions, ${project.memory_count || 0} memories</div>
+                        </div>
+                    `;
+                    menu.appendChild(item);
+                });
+
+                // Select first project by default or from localStorage
+                const savedProject = localStorage.getItem('currentProject');
+                if (savedProject && data.projects.find(p => p.project_path === savedProject)) {
+                    selectProject(savedProject);
+                } else if (data.projects.length) {
+                    selectProject(data.projects[0].project_path);
+                }
+            } catch (e) {
+                console.error('Error loading projects:', e);
+                showToast('Failed to load projects', 'error');
+            }
+        }
+
+        function toggleProjectMenu() {
+            document.getElementById('projectMenu').classList.toggle('show');
+        }
+
+        async function selectProject(projectPath) {
+            currentProject = projectPath;
+            localStorage.setItem('currentProject', projectPath);
+
+            const name = projectPath.split(/[/\\]/).pop();
+            document.getElementById('currentProjectName').textContent = name;
+            document.getElementById('projectMenu').classList.remove('show');
+
+            // Update active state
+            document.querySelectorAll('.project-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event?.target?.closest('.project-item')?.classList.add('active');
+
+            // Load project config
+            await loadProjectConfig();
+            renderAgents();
+            renderMcps();
+            renderHooks();
+        }
+
+        async function loadProjectConfig() {
+            if (!currentProject) return;
+
+            try {
+                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/config`);
+                projectConfig = await response.json();
+
+                if (projectConfig.success) {
+                    updateStats(projectConfig.stats);
+                }
+            } catch (e) {
+                console.error('Error loading project config:', e);
+            }
+        }
+
+        // Agent Data
+        async function loadAgentData() {
+            try {
+                const [agentsRes, mcpsRes, hooksRes] = await Promise.all([
+                    fetch(`${API_URL}/api/agents`),
+                    fetch(`${API_URL}/api/mcps`),
+                    fetch(`${API_URL}/api/hooks`)
+                ]);
+
+                const agentsData = await agentsRes.json();
+                const mcpsData = await mcpsRes.json();
+                const hooksData = await hooksRes.json();
+
+                allAgents = agentsData.agents || [];
+                categories = agentsData.categories || {};
+                allMcps = mcpsData.mcps || [];
+                allHooks = hooksData.hooks || [];
+
+                document.getElementById('agentsTabCount').textContent = allAgents.length;
+                document.getElementById('mcpsTabCount').textContent = allMcps.length;
+                document.getElementById('hooksTabCount').textContent = allHooks.length;
+
+                renderCategoryFilter();
+
+                if (projectConfig) {
+                    renderAgents();
+                    renderMcps();
+                    renderHooks();
+                }
+            } catch (e) {
+                console.error('Error loading agent data:', e);
+            }
+        }
+
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_URL}/api/stats`);
+                const stats = await response.json();
+
+                document.getElementById('memoriesCount').textContent = stats.total_memories || 0;
+                document.getElementById('eventsCount').textContent = stats.total_timeline_events || 0;
+            } catch (e) {
+                console.error('Error loading stats:', e);
+            }
+        }
+
+        function updateStats(stats) {
+            if (!stats) return;
+
+            document.getElementById('enabledAgentsCount').textContent = stats.enabled_agents;
+            document.getElementById('agentsTotalCount').textContent = `/ ${stats.total_agents} total`;
+            document.getElementById('enabledMcpsCount').textContent = stats.enabled_mcps;
+            document.getElementById('mcpsTotalCount').textContent = `/ ${stats.total_mcps} total`;
+            document.getElementById('enabledHooksCount').textContent = stats.enabled_hooks;
+            document.getElementById('hooksTotalCount').textContent = `/ ${stats.total_hooks} total`;
+        }
+
+        // Rendering
+        function renderCategoryFilter() {
+            const container = document.getElementById('categoryFilter');
+            container.innerHTML = `
+                <div class="category-chip active" data-category="all" onclick="filterByCategory('all')">
+                    <i class="fas fa-th"></i>
+                    All
+                </div>
+            `;
+
+            Object.entries(categories).forEach(([key, cat]) => {
+                const chip = document.createElement('div');
+                chip.className = 'category-chip';
+                chip.dataset.category = key;
+                chip.style.setProperty('--chip-color', cat.color);
+                chip.onclick = () => filterByCategory(key);
+                chip.innerHTML = `
+                    <i class="fas fa-${getIconForCategory(cat.icon)}"></i>
+                    ${cat.name}
+                `;
+                container.appendChild(chip);
+            });
+        }
+
+        function getIconForCategory(icon) {
+            const iconMap = {
+                'code': 'code',
+                'shield-check': 'shield-alt',
+                'palette': 'palette',
+                'lightbulb': 'lightbulb',
+                'megaphone': 'bullhorn',
+                'settings': 'cog',
+                'chart-bar': 'chart-bar',
+                'cube': 'cube',
+                'search': 'search'
+            };
+            return iconMap[icon] || 'circle';
+        }
+
+        function renderAgents() {
+            const grid = document.getElementById('agentGrid');
+            const searchTerm = document.getElementById('agentSearch').value.toLowerCase();
+
+            let filteredAgents = allAgents;
+
+            if (activeCategory !== 'all') {
+                filteredAgents = filteredAgents.filter(a => a.category === activeCategory);
+            }
+
+            if (searchTerm) {
+                filteredAgents = filteredAgents.filter(a =>
+                    a.name.toLowerCase().includes(searchTerm) ||
+                    a.description.toLowerCase().includes(searchTerm) ||
+                    a.tags.some(t => t.includes(searchTerm))
+                );
+            }
+
+            if (!filteredAgents.length) {
+                grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 60px; color: var(--text-secondary);">No agents found</div>';
+                return;
+            }
+
+            grid.innerHTML = filteredAgents.map(agent => {
+                const config = projectConfig?.agents?.[agent.id] || { enabled: agent.default_enabled };
+                const category = categories[agent.category] || {};
+                const isEnabled = config.enabled;
+
+                return `
+                    <div class="agent-card ${isEnabled ? '' : 'disabled'}">
+                        <div class="agent-category-label" style="background: ${category.color || '#58a6ff'}"></div>
+                        <div class="agent-card-header">
+                            <div class="agent-icon" style="background: ${category.color}20; color: ${category.color}">
+                                <i class="fas fa-${getIconForCategory(category.icon)}"></i>
+                            </div>
+                            <div class="agent-toggle ${isEnabled ? 'active' : ''}" onclick="toggleAgent('${agent.id}', ${!isEnabled})"></div>
+                        </div>
+                        <div class="agent-name">${agent.name}</div>
+                        <div class="agent-description">${agent.description}</div>
+                        <div class="agent-tags">
+                            ${agent.tags.slice(0, 4).map(tag => `<span class="agent-tag">${tag}</span>`).join('')}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderMcps() {
+            const grid = document.getElementById('mcpGrid');
+
+            grid.innerHTML = allMcps.map(mcp => {
+                const config = projectConfig?.mcps?.[mcp.id] || { enabled: mcp.default_enabled };
+                const isEnabled = config.enabled;
+
+                return `
+                    <div class="config-card">
+                        <div class="config-icon" style="background: ${mcp.color}20; color: ${mcp.color}">
+                            <i class="fas fa-${getIconForMcp(mcp.icon)}"></i>
+                        </div>
+                        <div class="config-info">
+                            <div class="config-name">${mcp.name}</div>
+                            <div class="config-desc">${mcp.description}</div>
+                        </div>
+                        <div class="agent-toggle ${isEnabled ? 'active' : ''}" onclick="toggleMcp('${mcp.id}', ${!isEnabled})"></div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderHooks() {
+            const grid = document.getElementById('hookGrid');
+
+            grid.innerHTML = allHooks.map(hook => {
+                const config = projectConfig?.hooks?.[hook.id] || { enabled: hook.default_enabled };
+                const isEnabled = config.enabled;
+
+                return `
+                    <div class="config-card">
+                        <div class="config-icon" style="background: ${hook.color}20; color: ${hook.color}">
+                            <i class="fas fa-${getIconForMcp(hook.icon)}"></i>
+                        </div>
+                        <div class="config-info">
+                            <div class="config-name">${hook.name}</div>
+                            <div class="config-desc">${hook.description}</div>
+                            <div class="config-trigger"><i class="fas fa-bolt"></i> ${hook.trigger}</div>
+                        </div>
+                        <div class="agent-toggle ${isEnabled ? 'active' : ''}" onclick="toggleHook('${hook.id}', ${!isEnabled})"></div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function getIconForMcp(icon) {
+            const iconMap = {
+                'brain': 'brain',
+                'book': 'book',
+                'folder': 'folder',
+                'github': 'code-branch',
+                'database': 'database',
+                'globe': 'globe',
+                'anchor': 'anchor',
+                'shield': 'shield-alt',
+                'check-circle': 'check-circle',
+                'file-text': 'file-alt',
+                'message-circle': 'comment'
+            };
+            return iconMap[icon] || 'plug';
+        }
+
+        // Actions
+        async function toggleAgent(agentId, enabled) {
+            if (!currentProject) return;
+
+            try {
+                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/agent/${agentId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    await loadProjectConfig();
+                    renderAgents();
+                    showToast(`${agentId} ${enabled ? 'enabled' : 'disabled'}`, 'success');
+                }
+            } catch (e) {
+                showToast('Failed to update agent', 'error');
+            }
+        }
+
+        async function toggleMcp(mcpId, enabled) {
+            if (!currentProject) return;
+
+            try {
+                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/mcp/${mcpId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    await loadProjectConfig();
+                    renderMcps();
+                    showToast(`${mcpId} ${enabled ? 'enabled' : 'disabled'}`, 'success');
+                }
+            } catch (e) {
+                showToast('Failed to update MCP', 'error');
+            }
+        }
+
+        async function toggleHook(hookId, enabled) {
+            if (!currentProject) return;
+
+            try {
+                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/hook/${hookId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ enabled })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    await loadProjectConfig();
+                    renderHooks();
+                    showToast(`${hookId} ${enabled ? 'enabled' : 'disabled'}`, 'success');
+                }
+            } catch (e) {
+                showToast('Failed to update hook', 'error');
+            }
+        }
+
+        async function enableAllAgents(enabled) {
+            if (!currentProject) return;
+
+            const updates = {};
+            allAgents.forEach(agent => {
+                updates[agent.id] = enabled;
+            });
+
+            try {
+                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/agents/bulk`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ updates })
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    await loadProjectConfig();
+                    renderAgents();
+                    showToast(`All agents ${enabled ? 'enabled' : 'disabled'}`, 'success');
+                }
+            } catch (e) {
+                showToast('Failed to update agents', 'error');
+            }
+        }
+
+        // Filtering
+        function filterByCategory(category) {
+            activeCategory = category;
+
+            document.querySelectorAll('.category-chip').forEach(chip => {
+                chip.classList.toggle('active', chip.dataset.category === category);
+            });
+
+            renderAgents();
+        }
+
+        function filterAgents() {
+            renderAgents();
+        }
+
+        // Tabs
+        function switchTab(tabId) {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+
+            document.querySelector(`.tab[data-tab="${tabId}"]`).classList.add('active');
+            document.getElementById(`${tabId}-tab`).classList.add('active');
+
+            if (tabId === 'timeline') {
+                loadTimeline();
+            }
+        }
+
+        // Timeline - Enhanced with Causal Chains
+        let timelineFilter = 'all';
+
+        async function loadTimeline() {
+            const container = document.getElementById('timelineContainer');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+
+            try {
+                // Get session ID for current project
+                const sessionRes = await fetch(`${API_URL}/api/sessions/${encodeURIComponent(currentProject)}`);
+                const sessionData = await sessionRes.json();
+
+                if (!sessionData.sessions?.length) {
+                    container.innerHTML = `
+                        <div class="timeline-empty">
+                            <i class="fas fa-stream"></i>
+                            <div>No timeline events yet</div>
+                            <div style="font-size: 12px; margin-top: 8px;">Events will appear here as you work</div>
+                        </div>`;
+                    return;
+                }
+
+                const sessionId = sessionData.sessions[0].session_id;
+
+                const response = await fetch(`${API_URL}/a2a`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        id: Date.now(),
+                        method: 'tasks/send',
+                        params: {
+                            metadata: {
+                                skill_id: 'timeline_get',
+                                params: { session_id: sessionId, limit: 50 }
+                            }
+                        }
+                    })
+                });
+
+                const data = await response.json();
+                const result = JSON.parse(data.result?.artifacts?.[0]?.parts?.[0]?.text || '{}');
+
+                if (!result.events?.length) {
+                    container.innerHTML = `
+                        <div class="timeline-empty">
+                            <i class="fas fa-stream"></i>
+                            <div>No timeline events yet</div>
+                        </div>`;
+                    return;
+                }
+
+                // Build causal chains - group events by root_event_id (user_request)
+                const chains = buildCausalChains(result.events);
+
+                // Render filters
+                const filterHtml = `
+                    <div class="timeline-filters">
+                        <div class="timeline-filter-chip ${timelineFilter === 'all' ? 'active' : ''}" onclick="filterTimeline('all')">
+                            <i class="fas fa-layer-group"></i> All
+                        </div>
+                        <div class="timeline-filter-chip ${timelineFilter === 'decision' ? 'active' : ''}" onclick="filterTimeline('decision')">
+                            <i class="fas fa-lightbulb"></i> Decisions
+                        </div>
+                        <div class="timeline-filter-chip ${timelineFilter === 'observation' ? 'active' : ''}" onclick="filterTimeline('observation')">
+                            <i class="fas fa-eye"></i> Observations
+                        </div>
+                        <div class="timeline-filter-chip ${timelineFilter === 'anchor' ? 'active' : ''}" onclick="filterTimeline('anchor')">
+                            <i class="fas fa-anchor"></i> Anchors
+                        </div>
+                        <div class="timeline-filter-chip ${timelineFilter === 'outcome' ? 'active' : ''}" onclick="filterTimeline('outcome')">
+                            <i class="fas fa-check-circle"></i> Outcomes
+                        </div>
+                    </div>
+                `;
+
+                // Render chains
+                const chainsHtml = chains.map(chain => renderChain(chain)).join('');
+
+                container.innerHTML = filterHtml + chainsHtml;
+
+            } catch (e) {
+                console.error('Error loading timeline:', e);
+                container.innerHTML = `
+                    <div class="timeline-empty">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <div>Failed to load timeline</div>
+                    </div>`;
+            }
+        }
+
+        function buildCausalChains(events) {
+            // Sort events by created_at descending (newest first)
+            const sorted = [...events].sort((a, b) =>
+                new Date(b.created_at) - new Date(a.created_at)
+            );
+
+            // Group by root_event_id or create standalone chains
+            const chains = [];
+            const eventMap = new Map();
+
+            // First pass: index all events
+            sorted.forEach(event => {
+                eventMap.set(event.id, event);
+            });
+
+            // Second pass: build chains
+            const usedEvents = new Set();
+
+            // Find user_requests as chain roots
+            sorted.forEach(event => {
+                if (event.event_type === 'user_request' && !usedEvents.has(event.id)) {
+                    const chain = {
+                        root: event,
+                        children: []
+                    };
+
+                    // Find all events that belong to this request
+                    sorted.forEach(child => {
+                        if (child.root_event_id === event.id ||
+                            child.parent_event_id === event.id) {
+                            if (!usedEvents.has(child.id) && child.id !== event.id) {
+                                chain.children.push(child);
+                                usedEvents.add(child.id);
+                            }
+                        }
+                    });
+
+                    usedEvents.add(event.id);
+                    chains.push(chain);
+                }
+            });
+
+            // Create chains for orphaned events (no user_request parent)
+            sorted.forEach(event => {
+                if (!usedEvents.has(event.id)) {
+                    if (event.event_type !== 'action') {
+                        // Non-action events get their own mini-chain
+                        chains.push({
+                            root: null,
+                            children: [event]
+                        });
+                    } else {
+                        // Group consecutive actions together
+                        const lastChain = chains[chains.length - 1];
+                        if (lastChain && !lastChain.root) {
+                            lastChain.children.push(event);
+                        } else {
+                            chains.push({
+                                root: null,
+                                children: [event]
+                            });
+                        }
+                    }
+                    usedEvents.add(event.id);
+                }
+            });
+
+            return chains;
+        }
+
+        function renderChain(chain) {
+            // Filter events based on current filter
+            let children = chain.children;
+            if (timelineFilter !== 'all') {
+                children = children.filter(e => e.event_type === timelineFilter);
+                if (children.length === 0 && chain.root?.event_type !== timelineFilter) {
+                    return '';
+                }
+            }
+
+            if (chain.root) {
+                // Full chain with user_request root
+                return `
+                    <div class="timeline-chain">
+                        <div class="timeline-request">
+                            <div class="timeline-request-header">
+                                <div class="timeline-request-icon">
+                                    <i class="fas fa-user"></i>
+                                </div>
+                                <div class="timeline-request-title">${escapeHtml(chain.root.summary)}</div>
+                                <div class="timeline-request-time">${formatTime(chain.root.created_at)}</div>
+                            </div>
+                            ${chain.root.details ? `<div class="timeline-request-goal">${getGoalFromDetails(chain.root.details)}</div>` : ''}
+                        </div>
+                        ${children.length > 0 ? `
+                            <div class="timeline-children">
+                                ${children.map((event, idx) => renderEvent(event, idx === children.length - 1)).join('')}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+            } else {
+                // Orphaned events without a root
+                return `
+                    <div class="timeline-chain" style="border-left-color: var(--border-color);">
+                        <div class="timeline-children" style="padding-top: 8px;">
+                            ${children.map((event, idx) => renderEvent(event, idx === children.length - 1)).join('')}
+                        </div>
+                    </div>
+                `;
+            }
+        }
+
+        function renderEvent(event, isLast) {
+            const icons = {
+                'decision': 'lightbulb',
+                'observation': 'eye',
+                'action': 'play',
+                'outcome': 'check-circle',
+                'anchor': 'anchor',
+                'error': 'exclamation-circle'
+            };
+
+            const details = parseDetails(event.details);
+            const confidence = event.confidence || details?.confidence;
+            const outcome = event.status || details?.outcome?.status;
+
+            return `
+                <div class="timeline-event">
+                    <div class="timeline-connector" ${isLast ? 'style="height: 50%;"' : ''}></div>
+                    <div class="timeline-dot dot-${event.event_type}">
+                        <i class="fas fa-${icons[event.event_type] || 'circle'}"></i>
+                    </div>
+                    <div class="timeline-content">
+                        <div class="timeline-type-badge badge-${event.event_type}">
+                            <i class="fas fa-${icons[event.event_type] || 'circle'}"></i>
+                            ${event.event_type.replace('_', ' ')}
+                        </div>
+                        <div class="timeline-summary">${escapeHtml(event.summary)}</div>
+                        ${details?.reasoning ? `<div class="timeline-details"><strong>Reasoning:</strong> ${escapeHtml(details.reasoning)}</div>` : ''}
+                        ${details?.significance ? `<div class="timeline-details"><strong>Significance:</strong> ${escapeHtml(details.significance)}</div>` : ''}
+                        <div class="timeline-meta">
+                            <span class="timeline-time">${formatTime(event.created_at)}</span>
+                            ${confidence ? `<span class="timeline-confidence ${confidence > 0.7 ? 'high' : ''}">${Math.round(confidence * 100)}% confidence</span>` : ''}
+                            ${event.is_anchor ? `<span class="timeline-anchor-badge"><i class="fas fa-anchor"></i> Anchor</span>` : ''}
+                            ${outcome === 'success' ? `<span class="timeline-outcome-badge success"><i class="fas fa-check"></i> Success</span>` : ''}
+                            ${outcome === 'failed' ? `<span class="timeline-outcome-badge failed"><i class="fas fa-times"></i> Failed</span>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        function parseDetails(details) {
+            if (!details) return null;
+            try {
+                return typeof details === 'string' ? JSON.parse(details) : details;
+            } catch {
+                return null;
+            }
+        }
+
+        function getGoalFromDetails(details) {
+            const parsed = parseDetails(details);
+            return parsed?.goal || parsed?.intent || '';
+        }
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleString();
+        }
+
+        function escapeHtml(text) {
+            if (!text) return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function filterTimeline(filter) {
+            timelineFilter = filter;
+            loadTimeline();
+        }
+
+        // Toast
+        function showToast(message, type = 'success') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `
+                <i class="fas fa-${type === 'success' ? 'check-circle' : 'exclamation-circle'}" style="color: var(--accent-${type === 'success' ? 'green' : 'red'})"></i>
+                <span>${message}</span>
+            `;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.style.animation = 'slideIn 0.3s ease reverse';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (!e.target.closest('.project-dropdown')) {
+                document.getElementById('projectMenu').classList.remove('show');
+            }
+        });
+
+        // Health check
+        async function checkHealth() {
+            try {
+                const response = await fetch(`${API_URL}/health`);
+                const data = await response.json();
+
+                const indicator = document.getElementById('statusIndicator');
+                const text = document.getElementById('statusText');
+
+                if (data.status === 'healthy') {
+                    indicator.style.borderColor = 'rgba(63, 185, 80, 0.3)';
+                    indicator.style.background = 'rgba(63, 185, 80, 0.1)';
+                    indicator.style.color = 'var(--accent-green)';
+                    text.textContent = 'Connected';
+                } else {
+                    throw new Error('Unhealthy');
+                }
+            } catch (e) {
+                const indicator = document.getElementById('statusIndicator');
+                const text = document.getElementById('statusText');
+                indicator.style.borderColor = 'rgba(248, 81, 73, 0.3)';
+                indicator.style.background = 'rgba(248, 81, 73, 0.1)';
+                indicator.style.color = 'var(--accent-red)';
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        // Check health periodically
+        setInterval(checkHealth, 10000);
+        checkHealth();
+    </script>
+</body>
+</html>

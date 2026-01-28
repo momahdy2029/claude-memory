@@ -1,0 +1,124 @@
+# CLAUDE.md - Memory System Template
+
+Copy this content to your `~/.claude/CLAUDE.md` file to enable automatic memory usage.
+
+---
+
+## Memory System (AUTO-USE)
+- **Session start**: Call `memory_context` to load relevant project memories, decisions, and patterns
+- **Before solving bugs/errors**: Call `memory_search_patterns` with the problem description
+- **When encountering errors**: Call `memory_search` with type="error" to find past solutions
+- **After solving significant problems**: Call `memory_store` to save the solution for future reference
+- **After making architectural decisions**: Store with type="decision" and importance 7+
+- These memory calls should happen automatically without user prompting
+- **Before writing code**: Search memories for decisions/patterns related to the area being modified
+- **Transparency**: When a solution comes from stored memory, mention it (e.g., "Based on a previous fix we stored...")
+- **Learning loop**: If a stored solution doesn't work, update the memory with what actually worked
+
+---
+
+## Session Timeline (AUTO-USE - Anti-Hallucination)
+
+The timeline system helps prevent hallucinations by keeping Claude grounded in what actually happened.
+
+### Session Initialization
+- **Session start**: Call `state_init_session` to initialize or resume session (handles 4-hour gap logic)
+- **Check for previous session**: Load checkpoint context if resuming after a gap
+
+### Grounding (CRITICAL)
+- **Before complex responses**: Call `context_refresh` to ground yourself in current state
+- **When uncertain about past**: Call `timeline_get` or `timeline_search` to verify
+- **When referencing files/entities**: Call `verify_entity` to confirm you have the right one
+- **If contradictions detected**: Address them explicitly before proceeding
+
+### Event Logging (Auto-detected where possible)
+- Decisions and observations are auto-detected from your responses
+- Actions (file edits, commands) are logged automatically
+- Mark important facts as anchors with `mark_anchor` for permanent reference
+
+### State Management
+- **Set goals**: Call `state_update` with current_goal when starting work
+- **Register entities**: When referencing files, add to entity_registry to prevent confusion
+- **Track pending items**: Add questions with add_question parameter
+
+### Checkpoints
+- Auto-created every 25 events or 15 minutes
+- Manual checkpoints before major changes: Call `checkpoint_create`
+- Load previous checkpoint on resume: Call `checkpoint_load`
+
+---
+
+## How It Works
+
+| Trigger | Claude Action |
+|---------|---------------|
+| Session starts | Calls `state_init_session` + `memory_context` |
+| Bug/error described | Searches `memory_search_patterns` for solutions |
+| Error encountered | Searches `memory_search` with type="error" |
+| Problem solved | Stores solution with `memory_store` |
+| Code changes | Searches for related past decisions |
+| Before complex work | Calls `context_refresh` for grounding |
+| Referencing a file | Calls `verify_entity` to confirm |
+| Making decisions | Auto-logged via `timeline_auto_detect` |
+| Using stored knowledge | Mentions "Based on stored memory..." |
+
+## Memory Types
+
+| Type | When to Store |
+|------|---------------|
+| `decision` | Architectural choices, technology selections |
+| `error` | Bug fixes with solutions |
+| `code` | Reusable patterns, snippets |
+| `preference` | User preferences, conventions |
+| `session` | End-of-session summaries |
+
+## Timeline Event Types
+
+| Type | When Created | Auto/Manual |
+|------|--------------|-------------|
+| `user_request` | User asks for something | Auto |
+| `clarification` | User corrects/clarifies | Auto |
+| `action` | File edit, command run | Auto |
+| `decision` | Explicit choice made | Auto-detected |
+| `observation` | Something noticed | Auto-detected |
+| `error` | Error encountered | Auto |
+| `checkpoint` | Session milestone | Auto (threshold) |
+| `anchor` | Verified fact | Manual |
+
+## Importance Levels
+
+| Level | Use For |
+|-------|---------|
+| 1-3 | Minor notes, temporary info |
+| 4-6 | Standard decisions, common patterns |
+| 7-8 | Important architectural decisions |
+| 9-10 | Critical fixes, core patterns |
+
+## Anti-Hallucination Protocol (MANDATORY)
+
+Before ANY file edit or significant action, I MUST:
+1. Check entity registry for correct file path - use registered entities, not guessed paths
+2. Verify action doesn't contradict anchors - established facts cannot be overridden
+3. State which registered entity I'm using and why
+4. If no entity registered for this file, register it first with state_update
+5. If uncertain about any fact, verify with context_refresh before proceeding
+
+Violating this protocol leads to hallucinations. When grounding context is injected, I WILL read and follow it.
+
+## Self-Improvement Protocol
+
+When I learn something important during a session that should persist:
+1. If it's a verified fact -> mark_anchor it
+2. If it's a pattern that worked -> call memory_store with type='decision'
+3. If it's a rule I should always follow -> call claude_md_add_instruction to add it here
+4. At session end -> call claude_md_suggest to see what should be persisted
+
+I have the ability to update this file. I should use it to become better over time.
+
+## Additional Guidelines
+
+1. **Trust anchors**: Events marked as `is_anchor=true` are verified facts
+2. **Check contradictions**: If `context_refresh` returns contradictions, address them
+3. **Verify entities**: Use `verify_entity` when referencing files, variables, etc.
+4. **Low confidence = verify**: If confidence < 0.7 on a decision, mark `needs_verification=true`
+5. **Be transparent**: When grounding reveals corrections, mention them explicitly
