@@ -237,6 +237,32 @@ All hooks read `MEMORY_AGENT_URL` env var (default: `http://localhost:8102`)
 2. Ensure `llama3.2:3b` model is pulled
 3. Check `extract-insights.py` is in Stop hooks
 
+### Settings file errors (extraKnownMarketplaces)
+If you see an error like:
+```
+extraKnownMarketplaces
+  └ claude-code-lsps: Expected object, but received boolean
+```
+
+This means a marketplace is configured incorrectly. The value must be an **object**, not a boolean:
+
+```json
+// ❌ Wrong
+"extraKnownMarketplaces": {
+  "claude-code-lsps": true
+}
+
+// ✅ Correct
+"extraKnownMarketplaces": {
+  "claude-code-lsps": {
+    "source": {
+      "source": "github",
+      "repo": "Piebald-AI/claude-code-lsps"
+    }
+  }
+}
+```
+
 ## License
 
 MIT
