@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude-memory__memory_search",
+      "Bash(claude mcp add:*)",
+      "Bash(netstat:*)",
+      "Bash(findstr:*)",
+      "Bash(curl:*)",
+      "Bash(timeout /t 5 /nobreak)",
+      "Bash(python:*)",
+      "mcp__claude-memory__memory_stats",
+      "mcp__claude-memory__memory_context",
+      "Bash(taskkill:*)",
+      "Bash(tasklist:*)",
+      "Bash(pkill:*)",
+      "Bash(killall:*)",
+      "Bash(cmd.exe /c \"taskkill /F /IM python3.12.exe\")",
+      "Bash(sqlite3:*)",
+      "Bash(wmic process where \"name=''python.exe'' or name=''python3.12.exe''\" get commandline)",
+      "Bash(cmd.exe /c \"taskkill /F /PID 58880\")",
+      "Bash(git add:*)"
+    ]
+  }
+}

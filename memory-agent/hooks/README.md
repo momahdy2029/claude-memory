@@ -1,6 +1,10 @@
-# Claude Code Hooks for Automatic Grounding
+# Claude Code Hooks for Automatic Memory & Grounding
 
-These hooks make the anti-hallucination system **automatic** - no relying on Claude to remember to call tools.
+These hooks make the memory system **fully automatic**:
+- Auto-capture tool executions, errors, and decisions
+- Auto-load context at session start
+- Auto-summarize at session end
+- Auto-inject grounding context before every response
 
 ## How It Works
 
@@ -87,6 +91,25 @@ cp hooks/auto-detect-response.py ~/.claude/hooks/
 pip install requests
 ```
 
+### 5. Configure Environment Variables (Optional)
+
+The hooks use environment variables for configuration. All have sensible defaults:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMORY_AGENT_URL` | `http://localhost:8102` | URL of the Memory Agent server |
+| `API_TIMEOUT` | `30` | Request timeout in seconds |
+
+Set these in your shell profile or before running Claude Code:
+
+```bash
+# In ~/.bashrc, ~/.zshrc, or equivalent
+export MEMORY_AGENT_URL=http://localhost:8102
+export API_TIMEOUT=30
+```
+
+Or create a `.env` file (see `.env.example` for all options).
+
 ## What Gets Injected
 
 Before every response, Claude sees:
@@ -125,6 +148,14 @@ The hooks will silently fail if the memory agent isn't running. Start it:
 ```bash
 cd memory-agent
 python main.py
+```
+
+### Wrong port configuration
+Ensure `MEMORY_AGENT_URL` matches the port your server is running on:
+```bash
+# Check what port the server is using (default: 8102)
+# Then set the environment variable if different:
+export MEMORY_AGENT_URL=http://localhost:8102
 ```
 
 ### No session file

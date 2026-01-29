@@ -12,32 +12,90 @@ This is the REAL anti-hallucination layer - automatic, not relying on Claude to 
 import os
 import sys
 import json
+import logging
 import requests
 from pathlib import Path
+from typing import Any, Optional
 
-MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8100")
+# Configure logging to stderr (important for Claude Code hooks)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+logger = logging.getLogger(__name__)
+
+# Configuration from environment
+MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
+
+
+def safe_get(data: Any, *keys, default: Any = None) -> Any:
+    """
+    Safely navigate nested data structures (dicts and lists).
+
+    Args:
+        data: The data structure to navigate
+        *keys: Keys (str for dict) or indices (int for list) to traverse
+        default: Value to return if path doesn't exist
+
+    Returns:
+        The value at the path, or default if not found
+
+    Example:
+        safe_get(result, "result", "artifacts", 0, "parts", 0, "text")
+    """
+    for key in keys:
+        if data is None:
+            return default
+        if isinstance(data, dict):
+            data = data.get(key, default)
+        elif isinstance(data, list) and isinstance(key, int):
+            if 0 <= key < len(data):
+                data = data[key]
+            else:
+                return default
+        else:
+            return default
+    return data
+
 
 def get_project_path():
     """Get current working directory as project path."""
     return os.getcwd()
 
+
 def load_session_data():
     """Load session data from JSON file."""
     session_file = Path(get_project_path()) / ".claude_session"
     if session_file.exists():
-        content = session_file.read_text().strip()
         try:
+            content = session_file.read_text().strip()
             # Try JSON format first
             return json.loads(content)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON decode error, trying legacy format: {e}")
             # Fall back to legacy plain text format (just session_id)
-            return {"session_id": content}
+            try:
+                content = session_file.read_text().strip()
+                return {"session_id": content}
+            except (IOError, OSError) as read_err:
+                logger.warning(f"Failed to read session file: {read_err}")
+                return None
+        except (IOError, OSError) as e:
+            logger.warning(f"Failed to read session file: {e}")
+            return None
     return None
+
 
 def save_session_data(data: dict):
     """Save session data to JSON file."""
     session_file = Path(get_project_path()) / ".claude_session"
-    session_file.write_text(json.dumps(data, indent=2))
+    try:
+        session_file.write_text(json.dumps(data, indent=2))
+    except (IOError, OSError) as e:
+        logger.warning(f"Failed to save session data: {e}")
+
 
 def get_session_id():
     """Get or create session ID from environment or file."""
@@ -50,7 +108,8 @@ def get_session_id():
     data = load_session_data()
     return data.get("session_id") if data else None
 
-def call_memory_agent(skill_id: str, params: dict) -> dict:
+
+def call_memory_agent(skill_id: str, params: dict) -> Optional[dict]:
     """Call the memory agent API."""
     try:
         response = requests.post(
@@ -67,16 +126,28 @@ def call_memory_agent(skill_id: str, params: dict) -> dict:
                     }
                 }
             },
-            timeout=5
+            timeout=API_TIMEOUT
         )
         result = response.json()
-        if "result" in result and "artifacts" in result["result"]:
-            artifact_text = result["result"]["artifacts"][0]["parts"][0]["text"]
-            return json.loads(artifact_text)
-    except Exception as e:
-        # Silently fail - don't break Claude Code if memory agent is down
+
+        # Safely extract the artifact text using safe_get
+        artifact_text = safe_get(result, "result", "artifacts", 0, "parts", 0, "text")
+        if artifact_text:
+            try:
+                return json.loads(artifact_text)
+            except json.JSONDecodeError as e:
+                logger.debug(f"Failed to parse artifact text as JSON for skill '{skill_id}': {e}")
+                return None
         return None
-    return None
+
+    except requests.RequestException as e:
+        # Silently fail - don't break Claude Code if memory agent is down
+        logger.debug(f"Memory agent request failed for skill '{skill_id}': {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.debug(f"Failed to decode memory agent response for skill '{skill_id}': {e}")
+        return None
+
 
 def format_grounding_context(context: dict) -> str:
     """Format the grounding context for injection."""
@@ -138,6 +209,7 @@ def format_grounding_context(context: dict) -> str:
 
     return "\n".join(lines)
 
+
 def main():
     """Main entry point for the hook."""
     project_path = get_project_path()
@@ -151,10 +223,7 @@ def main():
         if init_result and init_result.get("session_id"):
             session_id = init_result["session_id"]
             # Save session data as JSON
-            try:
-                save_session_data({"session_id": session_id})
-            except:
-                pass
+            save_session_data({"session_id": session_id})
 
     if not session_id:
         # No session, no grounding - exit silently
@@ -175,6 +244,7 @@ def main():
             print(grounding_text)
 
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

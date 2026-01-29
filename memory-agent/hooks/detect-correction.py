@@ -20,7 +20,9 @@ import re
 import requests
 from pathlib import Path
 
-MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8100")
+# Configuration from environment
+MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
 
 # Patterns that indicate a correction
 CORRECTION_PATTERNS = [
@@ -69,7 +71,7 @@ def call_memory_agent(skill_id: str, params: dict) -> dict:
                     }
                 }
             },
-            timeout=3
+            timeout=API_TIMEOUT
         )
         return response.json()
     except:

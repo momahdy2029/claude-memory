@@ -11,10 +11,23 @@ Reads current_request_id from .claude_session to link actions to the root user r
 import os
 import sys
 import json
+import re
+import logging
 import requests
 from pathlib import Path
+from typing import Optional
 
-MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8100")
+# Configure logging to stderr (important for Claude Code hooks)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    stream=sys.stderr
+)
+logger = logging.getLogger(__name__)
+
+# Configuration from environment
+MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
+API_TIMEOUT = int(os.getenv("API_TIMEOUT", "30"))
 
 # Tools that represent meaningful actions to track
 TRACKABLE_TOOLS = {
@@ -26,25 +39,37 @@ TRACKABLE_TOOLS = {
     "Glob": "searched files"
 }
 
+
 def load_session_data():
     """Load session data from JSON file."""
     session_file = Path(os.getcwd()) / ".claude_session"
     if session_file.exists():
-        content = session_file.read_text().strip()
         try:
+            content = session_file.read_text().strip()
             # Try JSON format first
             return json.loads(content)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as e:
+            logger.debug(f"JSON decode error, trying legacy format: {e}")
             # Fall back to legacy plain text format (just session_id)
-            return {"session_id": content}
+            try:
+                content = session_file.read_text().strip()
+                return {"session_id": content}
+            except (IOError, OSError) as read_err:
+                logger.warning(f"Failed to read session file: {read_err}")
+                return None
+        except (IOError, OSError) as e:
+            logger.warning(f"Failed to read session file: {e}")
+            return None
     return None
+
 
 def get_session_id():
     """Get session ID from file."""
     data = load_session_data()
     return data.get("session_id") if data else None
 
-def call_memory_agent(skill_id: str, params: dict) -> dict:
+
+def call_memory_agent(skill_id: str, params: dict) -> Optional[dict]:
     """Call the memory agent API."""
     try:
         response = requests.post(
@@ -61,13 +86,18 @@ def call_memory_agent(skill_id: str, params: dict) -> dict:
                     }
                 }
             },
-            timeout=3
+            timeout=API_TIMEOUT
         )
         return response.json()
-    except:
+    except requests.RequestException as e:
+        logger.debug(f"Memory agent request failed for skill '{skill_id}': {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.debug(f"Failed to decode memory agent response for skill '{skill_id}': {e}")
         return None
 
-def extract_entities(tool_name: str, tool_input: dict) -> dict:
+
+def extract_entities(tool_name: str, tool_input: dict) -> Optional[dict]:
     """Extract entity references from tool input."""
     entities = {}
 
@@ -79,7 +109,6 @@ def extract_entities(tool_name: str, tool_input: dict) -> dict:
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         # Extract file paths from command (simple heuristic)
-        import re
         paths = re.findall(r'[\w\-./\\]+\.(py|js|ts|json|md|yaml|yml)', command)
         if paths:
             entities["files"] = paths
@@ -91,12 +120,17 @@ def extract_entities(tool_name: str, tool_input: dict) -> dict:
 
     return entities if entities else None
 
+
 def main():
     """Log the tool use to timeline."""
     # Read hook input from stdin
     try:
         hook_input = json.load(sys.stdin)
-    except:
+    except json.JSONDecodeError as e:
+        logger.debug(f"Failed to parse hook input JSON: {e}")
+        sys.exit(0)
+    except (IOError, OSError) as e:
+        logger.debug(f"Failed to read stdin: {e}")
         sys.exit(0)
 
     tool_name = hook_input.get("tool_name") or hook_input.get("tool")
@@ -170,6 +204,7 @@ def main():
     call_memory_agent("timeline_log", log_params)
 
     sys.exit(0)
+
 
 if __name__ == "__main__":
     main()

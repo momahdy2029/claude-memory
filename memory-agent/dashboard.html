@@ -224,6 +224,38 @@
             color: var(--accent-green);
         }
 
+        .ws-status {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 16px;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .ws-status.connected {
+            background: rgba(63, 185, 80, 0.15);
+            border: 1px solid rgba(63, 185, 80, 0.4);
+            color: var(--accent-green);
+        }
+
+        .ws-status.connected i {
+            animation: pulse 2s infinite;
+        }
+
+        .ws-status.disconnected {
+            background: rgba(248, 81, 73, 0.15);
+            border: 1px solid rgba(248, 81, 73, 0.4);
+            color: var(--accent-red);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
         .status-dot {
             width: 8px;
             height: 8px;
@@ -1035,6 +1067,10 @@
                     <span class="status-dot"></span>
                     <span id="statusText">Connected</span>
                 </div>
+                <div class="ws-status disconnected" id="wsStatus" title="Connecting...">
+                    <i class="fas fa-bolt"></i>
+                    <span>Live</span>
+                </div>
             </div>
         </div>
     </header>
@@ -1183,6 +1219,7 @@
 
     <script>
         const API_URL = 'http://localhost:8102';
+        const WS_URL = 'ws://localhost:8102/ws';
         let currentProject = null;
         let projectConfig = null;
         let allAgents = [];
@@ -1191,11 +1228,142 @@
         let categories = {};
         let activeCategory = 'all';
 
+        // WebSocket connection state
+        let ws = null;
+        let wsReconnectAttempts = 0;
+        const WS_MAX_RECONNECT = 5;
+        const WS_RECONNECT_DELAY = 3000;
+
+        // Initialize WebSocket connection
+        function initWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) return;
+
+            try {
+                ws = new WebSocket(WS_URL);
+
+                ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    wsReconnectAttempts = 0;
+                    updateConnectionStatus(true);
+                    // Subscribe to all events for current project
+                    if (currentProject) {
+                        ws.send(JSON.stringify({
+                            type: 'subscribe',
+                            event_types: ['*'],
+                            project_path: currentProject
+                        }));
+                    }
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleWebSocketMessage(data);
+                    } catch (e) {
+                        console.error('Error parsing WebSocket message:', e);
+                    }
+                };
+
+                ws.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    updateConnectionStatus(false);
+                    // Attempt reconnection
+                    if (wsReconnectAttempts < WS_MAX_RECONNECT) {
+                        wsReconnectAttempts++;
+                        setTimeout(initWebSocket, WS_RECONNECT_DELAY);
+                    }
+                };
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    updateConnectionStatus(false);
+                };
+            } catch (e) {
+                console.error('Failed to initialize WebSocket:', e);
+            }
+        }
+
+        // Handle incoming WebSocket messages
+        function handleWebSocketMessage(data) {
+            switch (data.type) {
+                case 'connected':
+                    console.log('WebSocket: Connected with client ID', data.client_id);
+                    break;
+
+                case 'memory_stored':
+                    // Refresh memory count
+                    loadStats();
+                    showToast(`Memory stored (${data.data?.type || 'chunk'})`, 'success');
+                    break;
+
+                case 'timeline_logged':
+                    // Refresh timeline if visible
+                    if (document.querySelector('.timeline-container:not(.hidden)')) {
+                        loadTimeline();
+                    }
+                    // Update event count
+                    const eventsCount = document.getElementById('eventsCount');
+                    if (eventsCount) {
+                        eventsCount.textContent = parseInt(eventsCount.textContent || 0) + 1;
+                    }
+                    break;
+
+                case 'anchor_marked':
+                    showToast('Anchor marked', 'info');
+                    break;
+
+                case 'anchor_conflict':
+                    showToast('Anchor conflict detected!', 'warning');
+                    break;
+
+                case 'cleanup_completed':
+                    showToast(`Cleanup: ${data.data?.archived || 0} archived, ${data.data?.deleted || 0} deleted`, 'success');
+                    loadStats();
+                    break;
+
+                case 'reindex_progress':
+                    const pct = Math.round((data.data?.progress / data.data?.total) * 100) || 0;
+                    showToast(`Reindexing: ${pct}%`, 'info');
+                    break;
+
+                case 'reindex_completed':
+                    showToast('Reindexing completed!', 'success');
+                    break;
+
+                case 'pong':
+                    // Heartbeat response
+                    break;
+
+                default:
+                    console.log('WebSocket event:', data.type, data);
+            }
+        }
+
+        // Update connection status indicator
+        function updateConnectionStatus(connected) {
+            const indicator = document.getElementById('wsStatus');
+            if (indicator) {
+                indicator.className = connected ? 'ws-status connected' : 'ws-status disconnected';
+                indicator.title = connected ? 'Real-time updates active' : 'Connecting...';
+            }
+        }
+
+        // Send WebSocket heartbeat
+        function sendHeartbeat() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'ping' }));
+            }
+        }
+
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
             await loadProjects();
             await loadAgentData();
             await loadStats();
+            // Initialize WebSocket after initial data load
+            initWebSocket();
+            // Set up heartbeat interval
+            setInterval(sendHeartbeat, 30000);
         });
 
         // Project Management
@@ -1263,6 +1431,15 @@
                 item.classList.remove('active');
             });
             event?.target?.closest('.project-item')?.classList.add('active');
+
+            // Resubscribe WebSocket to new project
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'subscribe',
+                    event_types: ['*'],
+                    project_path: projectPath
+                }));
+            }
 
             // Load project config
             await loadProjectConfig();
