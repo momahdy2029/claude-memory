@@ -226,7 +226,7 @@ def call_memory_agent(skill_id: str, params: dict) -> dict:
 
 
 def main():
-    """Analyze Claude's response and log detected events."""
+    """Analyze Claude's response and log detected events using BATCHED API calls."""
     # Read hook input from stdin
     try:
         hook_input = json.load(sys.stdin)
@@ -272,12 +272,18 @@ def main():
 
     # Get the current request ID for causal chain linking
     root_event_id = session_data.get("current_request_id")
+    project_path = os.getcwd()
 
-    # Build params for auto-detect
+    # =====================================================================
+    # OPTIMIZATION: Collect ALL events first, then send in ONE batched call
+    # This reduces 5+ HTTP calls to just 2 (auto_detect + batch)
+    # =====================================================================
+
+    # Build params for auto-detect (this does LLM-based analysis)
     auto_detect_params = {
         "session_id": session_id,
         "response_text": response_text,
-        "project_path": os.getcwd()
+        "project_path": project_path
     }
 
     # Add causal chain link if we have a root event
@@ -285,49 +291,55 @@ def main():
         auto_detect_params["parent_event_id"] = root_event_id
         auto_detect_params["root_event_id"] = root_event_id
 
-    # Call auto-detect to analyze response for decisions/observations
+    # Call auto-detect to analyze response for decisions/observations (1 API call)
     call_memory_agent("timeline_auto_detect", auto_detect_params)
 
-    # Extract and log thinking segments (the REASONING)
+    # =====================================================================
+    # Collect all additional events into a single batch
+    # =====================================================================
+    batch_events = []
+
+    # Extract thinking segments (the REASONING)
     thinking_segments = extract_thinking(response_text)
     for thinking_type, thinking_text in thinking_segments:
-        thinking_params = {
-            "session_id": session_id,
+        batch_events.append({
             "event_type": "thinking",
             "summary": f"[{thinking_type}] {thinking_text}"[:200],
-            "project_path": os.getcwd()
-        }
-        if root_event_id:
-            thinking_params["root_event_id"] = root_event_id
-            thinking_params["parent_event_id"] = root_event_id
-        call_memory_agent("timeline_log", thinking_params)
+            "confidence": 0.6  # Lower confidence for regex-detected thinking
+        })
 
-    # Extract and log decision points (the CHOICES)
+    # Extract decision points (the CHOICES)
     decisions = extract_decisions(response_text)
     for decision_type, decision_text in decisions:
-        decision_params = {
-            "session_id": session_id,
+        batch_events.append({
             "event_type": "decision",
             "summary": f"[{decision_type}] {decision_text}"[:200],
-            "project_path": os.getcwd()
-        }
-        if root_event_id:
-            decision_params["root_event_id"] = root_event_id
-            decision_params["parent_event_id"] = root_event_id
-        call_memory_agent("timeline_log", decision_params)
+            "confidence": 0.7  # Moderate confidence for regex-detected decisions
+        })
 
-    # Log an outcome event summarizing the result
+    # Add outcome event summarizing the result
     if root_event_id:
         status, summary = detect_outcome(response_text)
-        call_memory_agent("timeline_log", {
-            "session_id": session_id,
+        batch_events.append({
             "event_type": "outcome",
             "summary": summary[:200],
-            "status": status,
-            "root_event_id": root_event_id,
-            "parent_event_id": root_event_id,
-            "project_path": os.getcwd()
+            "status": status
         })
+
+    # =====================================================================
+    # Send all events in ONE batched API call (instead of 5+ separate calls)
+    # =====================================================================
+    if batch_events:
+        batch_params = {
+            "session_id": session_id,
+            "events": batch_events,
+            "project_path": project_path
+        }
+        if root_event_id:
+            batch_params["root_event_id"] = root_event_id
+            batch_params["parent_event_id"] = root_event_id
+
+        call_memory_agent("timeline_log_batch", batch_params)
 
     sys.exit(0)
 

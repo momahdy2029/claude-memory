@@ -86,6 +86,98 @@ class TimelineService:
     # EVENT LOGGING
     # ============================================================
 
+    async def log_events_batch(
+        self,
+        session_id: str,
+        events: List[Dict[str, Any]],
+        project_path: Optional[str] = None,
+        parent_event_id: Optional[int] = None,
+        root_event_id: Optional[int] = None,
+        generate_embeddings: bool = True
+    ) -> List[int]:
+        """
+        Log multiple timeline events in a single batch operation.
+
+        This is more efficient than calling log_event() multiple times because:
+        1. Single database transaction for all events
+        2. Batch embedding generation (if supported)
+        3. Single checkpoint check at the end
+
+        Args:
+            session_id: The session ID
+            events: List of event dicts, each containing:
+                - event_type: Type of event (required)
+                - summary: Brief description (required)
+                - details: Full context (optional)
+                - entities: Entity references (optional)
+                - status: Event status (optional, default "completed")
+                - outcome: Result or error message (optional)
+                - confidence: Confidence level 0-1 (optional)
+                - is_anchor: Whether this is a verified fact (optional)
+            project_path: Project path for all events (optional)
+            parent_event_id: ID of parent event for all events (optional)
+            root_event_id: ID of root user request for all events (optional)
+            generate_embeddings: Whether to generate embeddings (default True)
+
+        Returns:
+            List of event IDs in the same order as input events
+        """
+        if not events:
+            return []
+
+        event_ids = []
+
+        # Generate embeddings in batch if enabled
+        embeddings_list = []
+        if generate_embeddings and self.embeddings:
+            embed_texts = []
+            for event in events:
+                summary = event.get("summary", "")
+                details = event.get("details", "")
+                embed_text = summary
+                if details:
+                    embed_text += f"\n{details[:500]}"
+                embed_texts.append(embed_text)
+
+            # Try batch embedding if available, otherwise fall back to sequential
+            try:
+                if hasattr(self.embeddings, 'generate_embeddings_batch'):
+                    embeddings_list = await self.embeddings.generate_embeddings_batch(embed_texts)
+                else:
+                    # Fall back to sequential embedding generation
+                    for text in embed_texts:
+                        emb = await self.embeddings.generate_embedding(text)
+                        embeddings_list.append(emb)
+            except Exception:
+                # If embedding fails, continue without embeddings
+                embeddings_list = [None] * len(events)
+        else:
+            embeddings_list = [None] * len(events)
+
+        # Store all events (database service should handle transaction)
+        for i, event in enumerate(events):
+            event_id = await self.db.store_timeline_event(
+                session_id=session_id,
+                event_type=event.get("event_type", "observation"),
+                summary=event.get("summary", "")[:200],
+                details=event.get("details"),
+                embedding=embeddings_list[i] if i < len(embeddings_list) else None,
+                project_path=project_path,
+                parent_event_id=parent_event_id,
+                root_event_id=root_event_id,
+                entities=event.get("entities"),
+                status=event.get("status", "completed"),
+                outcome=event.get("outcome"),
+                confidence=event.get("confidence"),
+                is_anchor=event.get("is_anchor", False)
+            )
+            event_ids.append(event_id)
+
+        # Single checkpoint check after all events (not per-event)
+        await self._maybe_create_auto_checkpoint(session_id, project_path)
+
+        return event_ids
+
     async def log_event(
         self,
         session_id: str,

@@ -251,6 +251,89 @@ async def timeline_chain(
     }
 
 
+async def timeline_log_batch(
+    db: DatabaseService,
+    embeddings: EmbeddingService,
+    session_id: str,
+    events: List[Dict[str, Any]],
+    project_path: Optional[str] = None,
+    parent_event_id: Optional[int] = None,
+    root_event_id: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Log multiple events to the session timeline in a single batch operation.
+
+    This is the efficient way to log multiple events - use this instead of
+    calling timeline_log() multiple times. It reduces HTTP overhead and
+    database transactions.
+
+    Args:
+        db: Database service instance
+        embeddings: Embedding service instance
+        session_id: The session ID
+        events: List of event dicts, each containing:
+            - event_type: Type of event (required)
+                - 'user_request': User asks for something
+                - 'clarification': User clarifies or corrects
+                - 'action': Claude takes an action (file edit, command)
+                - 'decision': Explicit choice made
+                - 'observation': Something Claude noticed
+                - 'thinking': Claude's reasoning process
+                - 'outcome': Result of a request
+                - 'error': Error encountered
+                - 'checkpoint': Session milestone
+            - summary: Brief description (<200 chars, required)
+            - details: Full context (optional)
+            - entities: Dict of entity references (optional)
+            - status: Event status - pending, in_progress, completed, failed (optional)
+            - outcome: Result or error message (optional)
+            - confidence: Confidence level 0-1 (optional)
+            - is_anchor: Whether this is a verified fact (optional)
+        project_path: Project path for all events (optional)
+        parent_event_id: ID of parent event for causal chain (optional)
+        root_event_id: ID of root user request for causal chain (optional)
+
+    Returns:
+        Dict with event IDs and summary
+    """
+    if not events:
+        return {
+            "success": True,
+            "event_ids": [],
+            "session_id": session_id,
+            "events_logged": 0,
+            "message": "No events to log"
+        }
+
+    timeline = TimelineService(db, embeddings)
+
+    event_ids = await timeline.log_events_batch(
+        session_id=session_id,
+        events=events,
+        project_path=project_path,
+        parent_event_id=parent_event_id,
+        root_event_id=root_event_id,
+        generate_embeddings=True
+    )
+
+    # Summarize what was logged
+    event_types = {}
+    for event in events:
+        et = event.get("event_type", "unknown")
+        event_types[et] = event_types.get(et, 0) + 1
+
+    type_summary = ", ".join(f"{count} {etype}" for etype, count in event_types.items())
+
+    return {
+        "success": True,
+        "event_ids": event_ids,
+        "session_id": session_id,
+        "events_logged": len(event_ids),
+        "event_types": event_types,
+        "message": f"Batch logged {len(event_ids)} events: {type_summary}"
+    }
+
+
 async def timeline_auto_detect(
     db: DatabaseService,
     embeddings: EmbeddingService,

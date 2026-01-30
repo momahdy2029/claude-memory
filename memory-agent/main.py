@@ -50,7 +50,7 @@ from skills.summarize import (
 )
 
 # Timeline skills (Anti-Hallucination Layer)
-from skills.timeline import timeline_log, timeline_get, timeline_search, timeline_auto_detect, timeline_chain
+from skills.timeline import timeline_log, timeline_log_batch, timeline_get, timeline_search, timeline_auto_detect, timeline_chain
 from skills.state import state_get, state_update, state_init_session
 from skills.checkpoint import checkpoint_create, checkpoint_load, checkpoint_list
 from skills.grounding import (
@@ -582,6 +582,30 @@ async def execute_skill(
         )
         return result
 
+    elif skill_id == "timeline_log_batch":
+        # Batch logging - more efficient than multiple timeline_log calls
+        result = await timeline_log_batch(
+            db=db,
+            embeddings=embeddings,
+            session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
+            events=params.get("events", []),
+            project_path=params.get("project_path"),
+            parent_event_id=params.get("parent_event_id"),
+            root_event_id=params.get("root_event_id")
+        )
+        # Broadcast single update for the batch
+        if result.get("events_logged", 0) > 0:
+            await broadcast_event(
+                EventTypes.TIMELINE_LOGGED,
+                {
+                    "event_ids": result.get("event_ids", []),
+                    "batch_size": result.get("events_logged", 0),
+                    "event_types": result.get("event_types", {})
+                },
+                params.get("project_path")
+            )
+        return result
+
     elif skill_id == "timeline_get":
         return await timeline_get(
             db=db,
@@ -1036,6 +1060,149 @@ async def api_get_stats():
 
     stats["success"] = True
     return stats
+
+
+@app.get("/api/memories")
+async def api_get_memories(
+    project_path: Optional[str] = None,
+    memory_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0
+):
+    """Get memories with optional filtering by project and type."""
+    try:
+        query = "SELECT * FROM memories WHERE 1=1"
+        params = []
+
+        if project_path:
+            query += " AND project_path = ?"
+            params.append(project_path)
+
+        if memory_type and memory_type != "all":
+            query += " AND type = ?"
+            params.append(memory_type)
+
+        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+
+        memories = await db.execute_query(query, params)
+
+        # Get total count
+        count_query = "SELECT COUNT(*) as count FROM memories WHERE 1=1"
+        count_params = []
+        if project_path:
+            count_query += " AND project_path = ?"
+            count_params.append(project_path)
+        if memory_type and memory_type != "all":
+            count_query += " AND type = ?"
+            count_params.append(memory_type)
+
+        count_result = await db.execute_query(count_query, count_params)
+        total = count_result[0]["count"] if count_result else 0
+
+        return {
+            "success": True,
+            "memories": memories,
+            "total": total,
+            "limit": limit,
+            "offset": offset
+        }
+    except Exception as e:
+        logger.error(f"Failed to get memories: {e}")
+        return {"success": False, "error": str(e), "memories": []}
+
+
+@app.get("/api/patterns")
+async def api_get_patterns(
+    project_path: Optional[str] = None,
+    problem_type: Optional[str] = None,
+    limit: int = 50
+):
+    """Get stored patterns with optional filtering."""
+    try:
+        query = "SELECT * FROM patterns WHERE 1=1"
+        params = []
+
+        if problem_type and problem_type != "all":
+            query += " AND problem_type = ?"
+            params.append(problem_type)
+
+        query += " ORDER BY success_count DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+
+        patterns = await db.execute_query(query, params)
+
+        return {
+            "success": True,
+            "patterns": patterns or []
+        }
+    except Exception as e:
+        logger.error(f"Failed to get patterns: {e}")
+        return {"success": False, "error": str(e), "patterns": []}
+
+
+@app.get("/api/search")
+async def api_search_memories(
+    query: str,
+    project_path: Optional[str] = None,
+    limit: int = 20
+):
+    """Semantic search across memories."""
+    try:
+        results = await semantic_search(
+            db=db,
+            embeddings=embeddings,
+            query=query,
+            project_path=project_path,
+            limit=limit
+        )
+        return {
+            "success": True,
+            "results": results.get("results", []),
+            "query": query
+        }
+    except Exception as e:
+        logger.error(f"Search failed: {e}")
+        return {"success": False, "error": str(e), "results": []}
+
+
+@app.get("/api/timeline")
+async def api_get_timeline(
+    project_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+    event_type: Optional[str] = None,
+    limit: int = 100
+):
+    """Get timeline events with optional filtering."""
+    try:
+        query = "SELECT * FROM timeline_events WHERE 1=1"
+        params = []
+
+        if project_path:
+            query += " AND project_path = ?"
+            params.append(project_path)
+
+        if session_id:
+            query += " AND session_id = ?"
+            params.append(session_id)
+
+        if event_type and event_type != "all":
+            query += " AND event_type = ?"
+            params.append(event_type)
+
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+
+        events = await db.execute_query(query, params)
+
+        return {
+            "success": True,
+            "events": events or [],
+            "count": len(events) if events else 0
+        }
+    except Exception as e:
+        logger.error(f"Failed to get timeline: {e}")
+        return {"success": False, "error": str(e), "events": []}
 
 
 @app.get("/dashboard")
