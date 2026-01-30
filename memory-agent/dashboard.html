@@ -1791,8 +1791,21 @@
                 const data = await response.json();
                 const menu = document.getElementById('projectMenu');
                 menu.innerHTML = '';
+
+                // Add "All Projects" option first
+                const allItem = document.createElement('div');
+                allItem.className = 'project-item';
+                allItem.onclick = () => selectProject(null);
+                allItem.innerHTML = `
+                    <div class="project-item-icon" style="background: rgba(139, 148, 158, 0.2); color: #8b949e;"><i class="fas fa-globe"></i></div>
+                    <div class="project-item-info">
+                        <div class="project-item-name">All Projects</div>
+                        <div class="project-item-stats">Show all memories across projects</div>
+                    </div>
+                `;
+                menu.appendChild(allItem);
+
                 if (!data.success || !data.projects.length) {
-                    menu.innerHTML = '<div class="project-item"><span>No projects found</span></div>';
                     return;
                 }
                 const colors = ['#58a6ff', '#3fb950', '#a371f7', '#d29922', '#f85149'];
@@ -1814,8 +1827,9 @@
                 const savedProject = localStorage.getItem('currentProject');
                 if (savedProject && data.projects.find(p => p.project_path === savedProject)) {
                     selectProject(savedProject);
-                } else if (data.projects.length) {
-                    selectProject(data.projects[0].project_path);
+                } else {
+                    // Default to "All Projects" for better discovery
+                    selectProject(null);
                 }
             } catch (e) {
                 console.error('Error loading projects:', e);
@@ -1830,8 +1844,12 @@
         async function selectProject(projectPath) {
             showLoading('Loading project data...');
             currentProject = projectPath;
-            localStorage.setItem('currentProject', projectPath);
-            const name = projectPath.split(/[/\\]/).pop();
+            if (projectPath) {
+                localStorage.setItem('currentProject', projectPath);
+            } else {
+                localStorage.removeItem('currentProject');
+            }
+            const name = projectPath ? projectPath.split(/[/\\]/).pop() : 'All Projects';
             document.getElementById('currentProjectName').textContent = name;
             document.getElementById('projectMenu').classList.remove('show');
             document.querySelectorAll('.project-item').forEach(item => item.classList.remove('active'));
@@ -1839,7 +1857,7 @@
 
             // Resubscribe WebSocket
             if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'subscribe', event_types: ['*'], project_path: projectPath }));
+                ws.send(JSON.stringify({ type: 'subscribe', event_types: ['*'], project_path: projectPath || '*' }));
             }
 
             // Hot reload all data for the project
