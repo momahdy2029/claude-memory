@@ -898,6 +898,100 @@
             align-items: center;
             gap: 4px;
         }
+        .memory-card { cursor: pointer; transition: transform 0.15s, box-shadow 0.15s; }
+        .memory-card:active { transform: scale(0.98); }
+
+        /* Memory Detail Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .modal-overlay.show { display: flex; }
+        .modal-content {
+            background: var(--bg-secondary);
+            border-radius: 16px;
+            max-width: 700px;
+            width: 100%;
+            max-height: 80vh;
+            overflow: hidden;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--border-color);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+        }
+        .modal-header h3 {
+            margin: 0;
+            font-size: 18px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 24px;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+        .modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            max-height: calc(80vh - 140px);
+        }
+        .modal-body pre {
+            background: var(--bg-tertiary);
+            padding: 16px;
+            border-radius: 8px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--text-primary);
+            margin: 16px 0;
+        }
+        .modal-meta {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 16px;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid var(--border-color);
+        }
+        .modal-meta-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .modal-meta-item label {
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+        .modal-meta-item span {
+            font-size: 14px;
+            color: var(--text-primary);
+        }
         /* Pattern Cards */
         .pattern-card {
             background: var(--bg-card);
@@ -1564,6 +1658,7 @@
         const API_URL = 'http://localhost:8102';
         const WS_URL = 'ws://localhost:8102/ws';
         let currentProject = null;
+        let currentMemories = [];
         let projectConfig = null;
         let allAgents = [];
         let allMcps = [];
@@ -2399,8 +2494,9 @@
         }
 
         function renderMemoryCards(memories) {
-            return memories.map(memory => `
-                <div class="memory-card">
+            currentMemories = memories; // Store for modal access
+            return memories.map((memory, index) => `
+                <div class="memory-card" onclick="showMemoryDetail(${index})" title="Click to view full content">
                     <div class="memory-header">
                         <span class="memory-type-badge memory-type-${memory.type}">${memory.type}</span>
                         <span style="font-size: 12px; color: var(--text-muted);">${formatTime(memory.created_at)}</span>
@@ -2535,6 +2631,68 @@
 
         setInterval(checkHealth, 10000);
         checkHealth();
+
+        // Memory Detail Modal
+        function showMemoryDetail(index) {
+            const memory = currentMemories[index];
+            if (!memory) return;
+
+            const modal = document.getElementById('memoryModal');
+            document.getElementById('modalMemoryType').innerHTML = `<span class="memory-type-badge memory-type-${memory.type}">${memory.type}</span>`;
+            document.getElementById('modalMemoryContent').textContent = memory.content || 'No content';
+            document.getElementById('modalMemoryDate').textContent = formatTime(memory.created_at);
+            document.getElementById('modalMemoryImportance').textContent = memory.importance || 'N/A';
+            document.getElementById('modalMemoryProject').textContent = memory.project_path ? memory.project_path.split(/[/\\]/).pop() : 'None';
+            document.getElementById('modalMemoryTags').textContent = memory.tags ? JSON.parse(memory.tags).join(', ') : 'None';
+
+            modal.classList.add('show');
+        }
+
+        function closeMemoryModal() {
+            document.getElementById('memoryModal').classList.remove('show');
+        }
+
+        // Close modal on overlay click
+        document.getElementById('memoryModal')?.addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal-overlay')) closeMemoryModal();
+        });
+
+        // Close modal on Escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeMemoryModal();
+        });
     </script>
+
+    <!-- Memory Detail Modal -->
+    <div class="modal-overlay" id="memoryModal" onclick="if(event.target === this) closeMemoryModal()">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3><i class="fas fa-brain"></i> Memory Details</h3>
+                <button class="modal-close" onclick="closeMemoryModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="modalMemoryType" style="margin-bottom: 16px;"></div>
+                <pre id="modalMemoryContent"></pre>
+                <div class="modal-meta">
+                    <div class="modal-meta-item">
+                        <label>Created</label>
+                        <span id="modalMemoryDate"></span>
+                    </div>
+                    <div class="modal-meta-item">
+                        <label>Importance</label>
+                        <span id="modalMemoryImportance"></span>
+                    </div>
+                    <div class="modal-meta-item">
+                        <label>Project</label>
+                        <span id="modalMemoryProject"></span>
+                    </div>
+                    <div class="modal-meta-item">
+                        <label>Tags</label>
+                        <span id="modalMemoryTags"></span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
