@@ -1071,11 +1071,16 @@ async def api_get_memories(
 ):
     """Get memories with optional filtering by project and type."""
     try:
+        # Normalize project_path to match stored paths (handles backslash/forward slash mismatch)
+        if project_path:
+            project_path = normalize_path(project_path)
+
         query = "SELECT * FROM memories WHERE 1=1"
         params = []
 
         if project_path:
-            query += " AND project_path = ?"
+            # Use REPLACE to normalize stored paths for comparison
+            query += " AND REPLACE(project_path, '\\', '/') = ?"
             params.append(project_path)
 
         if memory_type and memory_type != "all":
@@ -1091,7 +1096,8 @@ async def api_get_memories(
         count_query = "SELECT COUNT(*) as count FROM memories WHERE 1=1"
         count_params = []
         if project_path:
-            count_query += " AND project_path = ?"
+            # Use REPLACE to normalize stored paths for comparison
+            count_query += " AND REPLACE(project_path, '\\', '/') = ?"
             count_params.append(project_path)
         if memory_type and memory_type != "all":
             count_query += " AND type = ?"

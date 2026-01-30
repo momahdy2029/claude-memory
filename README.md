@@ -263,6 +263,150 @@ This means a marketplace is configured incorrectly. The value must be an **objec
 }
 ```
 
+## Updating from Previous Versions
+
+If you have an older installation of the Claude Memory System, use the built-in update script to migrate your database and configuration to the latest version.
+
+### Check Current Version
+
+```powershell
+cd memory-agent
+python update_system.py --status
+```
+
+This shows:
+- Your current detected version
+- Latest available version
+- Database table counts
+- Any issues that need fixing (like path format inconsistencies)
+
+### Run the Update
+
+```powershell
+cd memory-agent
+python update_system.py
+```
+
+**Options:**
+- `--dry-run` - Preview changes without modifying anything
+- `--verbose` - Show detailed SQL operations
+- `--status` - Check status only (no changes)
+
+### What the Update Does
+
+The update script automatically:
+
+1. **Detects your version** based on database schema structure
+2. **Creates a backup** (`memories.db.backup_YYYYMMDD_HHMMSS`) before any changes
+3. **Creates missing tables** for features added in newer versions
+4. **Adds missing columns** to existing tables
+5. **Normalizes file paths** - fixes Windows backslash/forward slash inconsistencies
+6. **Handles duplicates** safely when paths create conflicts
+7. **Creates performance indexes** for faster queries
+8. **Records the version** in the database for future updates
+
+### Version History
+
+| Version | Features Added |
+|---------|----------------|
+| 1.0.0 | Initial release - memories table |
+| 1.1.0 | Patterns table for solution tracking |
+| 1.2.0 | Timeline events and session state |
+| 1.3.0 | Project configurations (agents, MCP, hooks) |
+| 1.4.0 | Insights extraction and memory archive |
+| 1.5.0 | Anchor conflict tracking and history |
+| 2.0.0 | Path normalization fix, cleanup system |
+| 2.1.0 | Current - full feature set, system info tracking |
+
+### Example Update Output
+
+```
+============================================================
+         Claude Memory System - Update Script
+============================================================
+
+[INFO] Detected version: 1.3.0
+[INFO] Target version: 2.1.0
+
+[STEP] Creating backup: memories.db.backup_20260130_125539
+[OK] Backup created successfully
+
+============================================================
+               Running Migrations
+============================================================
+
+[STEP] Creating insights table...
+[STEP] Creating insight_feedback table...
+[STEP] Creating memory_archive table...
+[STEP] Creating anchor_conflicts table...
+[STEP] Creating anchor_history table...
+[STEP] Creating cleanup_config table...
+[STEP] Adding column memories.embedding_model...
+[STEP] Normalizing paths in all tables...
+[INFO]   Normalizing 35 paths in memories.project_path
+[INFO]   Normalizing 137 paths in timeline_events.project_path
+[STEP] Creating index idx_memories_project...
+
+============================================================
+                 Migration Summary
+============================================================
+
+[OK] Completed 15 migrations:
+
+  1. Created insights table
+  2. Created insight_feedback table
+  3. Created memory_archive table
+  4. Created anchor_conflicts table
+  5. Created anchor_history table
+  6. Created cleanup_config table
+  7. Added memories.embedding_model column
+  8. Normalized 35 paths in memories.project_path
+  9. Normalized 137 paths in timeline_events.project_path
+  10. Created index idx_memories_project
+  ...
+
+Update completed successfully!
+  From version: 1.3.0
+  To version: 2.1.0
+
+  Backup saved: memories.db.backup_20260130_125539
+```
+
+### Restoring from Backup
+
+If something goes wrong, restore from the backup:
+
+```powershell
+cd memory-agent
+# Stop the server first
+taskkill /F /PID (Get-Content memory-agent.pid)
+
+# Restore the backup
+Copy-Item memories.db.backup_YYYYMMDD_HHMMSS memories.db -Force
+
+# Restart the server
+python main.py
+```
+
+### Manual Migration (Advanced)
+
+If the automatic update fails, you can manually fix common issues:
+
+**Fix path normalization:**
+```sql
+-- In SQLite
+UPDATE memories SET project_path = REPLACE(project_path, '\', '/');
+UPDATE timeline_events SET project_path = REPLACE(project_path, '\', '/');
+UPDATE session_state SET project_path = REPLACE(project_path, '\', '/');
+```
+
+**Check for issues:**
+```sql
+-- Find paths with backslashes
+SELECT COUNT(*) FROM memories WHERE project_path LIKE '%\%';
+SELECT COUNT(*) FROM timeline_events WHERE project_path LIKE '%\%';
+```
+
 ## License
 
 MIT
