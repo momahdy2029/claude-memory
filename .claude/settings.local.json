@@ -18,7 +18,13 @@
       "Bash(sqlite3:*)",
       "Bash(wmic process where \"name=''python.exe'' or name=''python3.12.exe''\" get commandline)",
       "Bash(cmd.exe /c \"taskkill /F /PID 58880\")",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(copy:*)",
+      "Bash(wmic process where \"name=''python3.12.exe''\" delete)",
+      "Bash(wmic process where \"name like ''python%''\" delete)"
     ]
   }
 }

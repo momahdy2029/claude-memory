@@ -159,6 +159,8 @@ class ConfidenceService:
 
     def _interpret_confidence(self, confidence: float) -> str:
         """Human-readable interpretation of confidence score."""
+        if confidence is None:
+            return "Unknown - no confidence score"
         if confidence >= 0.9:
             return "Very high - this memory is reliable"
         elif confidence >= 0.7:

@@ -707,6 +707,7 @@
             gap: 8px;
             margin-bottom: 20px;
             flex-wrap: wrap;
+            align-items: center;
         }
 
         .timeline-filter-chip {
@@ -730,12 +731,79 @@
             background: rgba(88, 166, 255, 0.1);
         }
 
+        .timeline-filter-divider {
+            width: 1px;
+            height: 24px;
+            background: var(--border-color);
+            margin: 0 8px;
+        }
+
+        .timeline-time-filter {
+            padding: 6px 14px;
+            border-radius: 16px;
+            font-size: 12px;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+        }
+
+        .timeline-time-filter:hover,
+        .timeline-time-filter.active {
+            border-color: var(--accent-purple);
+            color: var(--accent-purple);
+            background: rgba(163, 113, 247, 0.1);
+        }
+
         .timeline-chain {
             margin-bottom: 20px;
             border: 1px solid var(--border-color);
             border-radius: 12px;
             overflow: hidden;
             background: var(--bg-secondary);
+            transition: all 0.3s;
+        }
+
+        .timeline-chain.collapsed .timeline-children {
+            display: none;
+        }
+
+        .timeline-chain.collapsed .timeline-request {
+            border-radius: 12px;
+        }
+
+        .timeline-collapse-btn {
+            width: 24px;
+            height: 24px;
+            border-radius: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s;
+            font-size: 12px;
+        }
+
+        .timeline-collapse-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+            color: var(--text-primary);
+        }
+
+        .timeline-chain.collapsed .timeline-collapse-btn i {
+            transform: rotate(-90deg);
+        }
+
+        .timeline-children-count {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: rgba(88, 166, 255, 0.2);
+            color: var(--accent-blue);
+            margin-left: 8px;
         }
 
         .timeline-request {
@@ -845,6 +913,24 @@
             line-height: 1.5;
         }
 
+        .timeline-summary.truncated {
+            cursor: pointer;
+        }
+
+        .timeline-summary.truncated:hover {
+            color: var(--accent-blue);
+        }
+
+        .timeline-summary.expanded {
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: var(--bg-tertiary);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: 'SF Mono', Monaco, monospace;
+            font-size: 12px;
+        }
+
         .timeline-details {
             font-size: 12px;
             color: var(--text-secondary);
@@ -892,20 +978,86 @@
         }
 
         .timeline-outcome-badge {
-            font-size: 10px;
-            padding: 3px 10px;
+            font-size: 11px;
+            padding: 4px 12px;
             border-radius: 10px;
-            font-weight: 500;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
         }
 
         .timeline-outcome-badge.success {
-            background: rgba(63, 185, 80, 0.15);
+            background: rgba(63, 185, 80, 0.2);
             color: var(--accent-green);
+            border: 1px solid rgba(63, 185, 80, 0.4);
         }
 
         .timeline-outcome-badge.failed {
-            background: rgba(248, 81, 73, 0.15);
+            background: rgba(248, 81, 73, 0.2);
             color: var(--accent-red);
+            border: 1px solid rgba(248, 81, 73, 0.4);
+        }
+
+        /* Enhanced anchor event styling */
+        .timeline-event.anchor-event {
+            background: linear-gradient(135deg, rgba(57, 212, 212, 0.08) 0%, rgba(163, 113, 247, 0.05) 100%);
+            border-left: 3px solid var(--accent-cyan);
+            margin: 4px 8px;
+            border-radius: 8px;
+        }
+
+        .timeline-event.anchor-event .timeline-summary {
+            color: var(--accent-cyan);
+            font-weight: 500;
+        }
+
+        /* File path link */
+        .timeline-file-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-size: 11px;
+            font-family: 'SF Mono', Monaco, monospace;
+            color: var(--accent-blue);
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-top: 6px;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .timeline-file-link:hover {
+            background: rgba(88, 166, 255, 0.15);
+        }
+
+        .timeline-file-link i {
+            flex-shrink: 0;
+        }
+
+        .timeline-file-link.copied {
+            background: rgba(63, 185, 80, 0.2);
+            color: var(--accent-green);
+        }
+
+        /* Outcome event enhanced styling */
+        .timeline-event.outcome-event {
+            background: linear-gradient(135deg, rgba(63, 185, 80, 0.08) 0%, transparent 100%);
+            border-left: 3px solid var(--accent-green);
+            margin: 4px 8px;
+            border-radius: 8px;
+        }
+
+        .timeline-event.outcome-event.failed {
+            background: linear-gradient(135deg, rgba(248, 81, 73, 0.08) 0%, transparent 100%);
+            border-left-color: var(--accent-red);
         }
 
         /* Event type styling */
@@ -1788,6 +1940,7 @@
 
         // Timeline - Enhanced with Causal Chains
         let timelineFilter = 'all';
+        let timelineTimeRange = 'all'; // all, hour, today, week
 
         async function loadTimeline() {
             const container = document.getElementById('timelineContainer');
@@ -1859,6 +2012,19 @@
                         <div class="timeline-filter-chip ${timelineFilter === 'outcome' ? 'active' : ''}" onclick="filterTimeline('outcome')">
                             <i class="fas fa-check-circle"></i> Outcomes
                         </div>
+                        <div class="timeline-filter-divider"></div>
+                        <div class="timeline-time-filter ${timelineTimeRange === 'hour' ? 'active' : ''}" onclick="filterTimeRange('hour')">
+                            <i class="fas fa-clock"></i> Last Hour
+                        </div>
+                        <div class="timeline-time-filter ${timelineTimeRange === 'today' ? 'active' : ''}" onclick="filterTimeRange('today')">
+                            <i class="fas fa-calendar-day"></i> Today
+                        </div>
+                        <div class="timeline-time-filter ${timelineTimeRange === 'week' ? 'active' : ''}" onclick="filterTimeRange('week')">
+                            <i class="fas fa-calendar-week"></i> This Week
+                        </div>
+                        <div class="timeline-time-filter ${timelineTimeRange === 'all' ? 'active' : ''}" onclick="filterTimeRange('all')">
+                            <i class="fas fa-infinity"></i> All Time
+                        </div>
                     </div>
                 `;
 
@@ -1883,65 +2049,37 @@
                 new Date(b.created_at) - new Date(a.created_at)
             );
 
-            // Group by root_event_id or create standalone chains
+            // Build chains using TIME-BASED grouping (more robust than ID linking)
+            // Each user_request starts a new chain, events after it belong to that chain
             const chains = [];
-            const eventMap = new Map();
+            let currentChain = null;
 
-            // First pass: index all events
-            sorted.forEach(event => {
-                eventMap.set(event.id, event);
-            });
+            // Process in chronological order (oldest first) to build chains correctly
+            const chronological = [...sorted].reverse();
 
-            // Second pass: build chains
-            const usedEvents = new Set();
-
-            // Find user_requests as chain roots
-            sorted.forEach(event => {
-                if (event.event_type === 'user_request' && !usedEvents.has(event.id)) {
-                    const chain = {
+            chronological.forEach(event => {
+                if (event.event_type === 'user_request') {
+                    // Start a new chain with this user_request as root
+                    currentChain = {
                         root: event,
                         children: []
                     };
-
-                    // Find all events that belong to this request
-                    sorted.forEach(child => {
-                        if (child.root_event_id === event.id ||
-                            child.parent_event_id === event.id) {
-                            if (!usedEvents.has(child.id) && child.id !== event.id) {
-                                chain.children.push(child);
-                                usedEvents.add(child.id);
-                            }
-                        }
+                    chains.unshift(currentChain); // Add to front (newest first)
+                } else if (currentChain) {
+                    // Add to current chain
+                    currentChain.children.push(event);
+                } else {
+                    // Orphaned event before any user_request - create mini-chain
+                    chains.unshift({
+                        root: null,
+                        children: [event]
                     });
-
-                    usedEvents.add(event.id);
-                    chains.push(chain);
                 }
             });
 
-            // Create chains for orphaned events (no user_request parent)
-            sorted.forEach(event => {
-                if (!usedEvents.has(event.id)) {
-                    if (event.event_type !== 'action') {
-                        // Non-action events get their own mini-chain
-                        chains.push({
-                            root: null,
-                            children: [event]
-                        });
-                    } else {
-                        // Group consecutive actions together
-                        const lastChain = chains[chains.length - 1];
-                        if (lastChain && !lastChain.root) {
-                            lastChain.children.push(event);
-                        } else {
-                            chains.push({
-                                root: null,
-                                children: [event]
-                            });
-                        }
-                    }
-                    usedEvents.add(event.id);
-                }
+            // Reverse children to show newest first within each chain
+            chains.forEach(chain => {
+                chain.children.reverse();
             });
 
             return chains;
@@ -1957,16 +2095,36 @@
                 }
             }
 
+            // Filter by time range
+            if (timelineTimeRange !== 'all') {
+                const now = new Date();
+                let cutoff;
+                switch (timelineTimeRange) {
+                    case 'hour': cutoff = new Date(now - 60 * 60 * 1000); break;
+                    case 'today': cutoff = new Date(now.setHours(0, 0, 0, 0)); break;
+                    case 'week': cutoff = new Date(now - 7 * 24 * 60 * 60 * 1000); break;
+                }
+                if (chain.root && new Date(chain.root.created_at) < cutoff) {
+                    return '';
+                }
+            }
+
+            const chainId = chain.root?.id || Math.random().toString(36).substr(2, 9);
+
             if (chain.root) {
                 // Full chain with user_request root
                 return `
-                    <div class="timeline-chain">
-                        <div class="timeline-request">
+                    <div class="timeline-chain" id="chain-${chainId}">
+                        <div class="timeline-request" onclick="toggleChain('${chainId}')">
                             <div class="timeline-request-header">
+                                <button class="timeline-collapse-btn" title="Collapse/Expand">
+                                    <i class="fas fa-chevron-down"></i>
+                                </button>
                                 <div class="timeline-request-icon">
                                     <i class="fas fa-user"></i>
                                 </div>
                                 <div class="timeline-request-title">${escapeHtml(chain.root.summary)}</div>
+                                ${children.length > 0 ? `<span class="timeline-children-count">${children.length} events</span>` : ''}
                                 <div class="timeline-request-time">${formatTime(chain.root.created_at)}</div>
                             </div>
                             ${chain.root.details ? `<div class="timeline-request-goal">${getGoalFromDetails(chain.root.details)}</div>` : ''}
@@ -1990,6 +2148,13 @@
             }
         }
 
+        function toggleChain(chainId) {
+            const chain = document.getElementById('chain-' + chainId);
+            if (chain) {
+                chain.classList.toggle('collapsed');
+            }
+        }
+
         function renderEvent(event, isLast) {
             const icons = {
                 'decision': 'lightbulb',
@@ -2003,9 +2168,20 @@
             const details = parseDetails(event.details);
             const confidence = event.confidence || details?.confidence;
             const outcome = event.status || details?.outcome?.status;
+            const filePath = details?.file_path || extractFilePath(event.summary);
+
+            // Enhanced class for anchors and outcomes
+            let eventClass = 'timeline-event';
+            if (event.is_anchor || event.event_type === 'anchor') {
+                eventClass += ' anchor-event';
+            }
+            if (event.event_type === 'outcome') {
+                eventClass += ' outcome-event';
+                if (outcome === 'failed') eventClass += ' failed';
+            }
 
             return `
-                <div class="timeline-event">
+                <div class="${eventClass}">
                     <div class="timeline-connector" ${isLast ? 'style="height: 50%;"' : ''}></div>
                     <div class="timeline-dot dot-${event.event_type}">
                         <i class="fas fa-${icons[event.event_type] || 'circle'}"></i>
@@ -2015,19 +2191,78 @@
                             <i class="fas fa-${icons[event.event_type] || 'circle'}"></i>
                             ${event.event_type.replace('_', ' ')}
                         </div>
-                        <div class="timeline-summary">${escapeHtml(event.summary)}</div>
+                        <div class="timeline-summary ${event.summary.includes('...') ? 'truncated' : ''}"
+                             onclick="toggleSummary(this)"
+                             data-full="${escapeHtml(details?.tool?.old_string || details?.command || event.summary)}"
+                             title="${event.summary.includes('...') ? 'Click to expand' : ''}">${escapeHtml(event.summary)}</div>
+                        ${filePath ? `
+                            <div class="timeline-file-link" onclick="copyFilePath(event, '${escapeHtml(filePath)}')" title="Click to copy path">
+                                <i class="fas fa-file-code"></i>
+                                <span>${escapeHtml(filePath.split(/[/\\]/).pop())}</span>
+                            </div>
+                        ` : ''}
                         ${details?.reasoning ? `<div class="timeline-details"><strong>Reasoning:</strong> ${escapeHtml(details.reasoning)}</div>` : ''}
                         ${details?.significance ? `<div class="timeline-details"><strong>Significance:</strong> ${escapeHtml(details.significance)}</div>` : ''}
                         <div class="timeline-meta">
                             <span class="timeline-time">${formatTime(event.created_at)}</span>
                             ${confidence ? `<span class="timeline-confidence ${confidence > 0.7 ? 'high' : ''}">${Math.round(confidence * 100)}% confidence</span>` : ''}
-                            ${event.is_anchor ? `<span class="timeline-anchor-badge"><i class="fas fa-anchor"></i> Anchor</span>` : ''}
+                            ${event.is_anchor ? `<span class="timeline-anchor-badge"><i class="fas fa-anchor"></i> Verified Fact</span>` : ''}
                             ${outcome === 'success' ? `<span class="timeline-outcome-badge success"><i class="fas fa-check"></i> Success</span>` : ''}
                             ${outcome === 'failed' ? `<span class="timeline-outcome-badge failed"><i class="fas fa-times"></i> Failed</span>` : ''}
                         </div>
                     </div>
                 </div>
             `;
+        }
+
+        function extractFilePath(summary) {
+            // Try to extract file path from summary
+            const patterns = [
+                /(?:in|from|to)\s+([^\s]+\.\w{2,4})/i,
+                /([A-Za-z]:[\\\/][^\s]+\.\w{2,4})/,
+                /([^\s]+\.\w{2,4})$/
+            ];
+            for (const pattern of patterns) {
+                const match = summary.match(pattern);
+                if (match) return match[1];
+            }
+            return null;
+        }
+
+        function copyFilePath(e, path) {
+            e.stopPropagation();
+            navigator.clipboard.writeText(path).then(() => {
+                const el = e.target.closest('.timeline-file-link');
+                if (el) {
+                    el.classList.add('copied');
+                    const span = el.querySelector('span');
+                    const originalText = span.textContent;
+                    span.textContent = 'Copied!';
+                    setTimeout(() => {
+                        el.classList.remove('copied');
+                        span.textContent = originalText;
+                    }, 1500);
+                }
+                showToast('Path copied to clipboard', 'success');
+            });
+        }
+
+        function toggleSummary(el) {
+            if (!el.classList.contains('truncated') && !el.classList.contains('expanded')) {
+                return; // Not expandable
+            }
+
+            el.classList.toggle('expanded');
+
+            if (el.classList.contains('expanded')) {
+                // Show full text
+                const fullText = el.dataset.full || el.textContent;
+                el.dataset.short = el.textContent;
+                el.textContent = fullText;
+            } else {
+                // Show truncated text
+                el.textContent = el.dataset.short || el.textContent;
+            }
         }
 
         function parseDetails(details) {
@@ -2058,6 +2293,11 @@
 
         function filterTimeline(filter) {
             timelineFilter = filter;
+            loadTimeline();
+        }
+
+        function filterTimeRange(range) {
+            timelineTimeRange = range;
             loadTimeline();
         }
 

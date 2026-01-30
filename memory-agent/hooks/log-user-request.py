@@ -178,6 +178,12 @@ def main():
         "project_path": os.getcwd()
     })
 
+    # Update session state with current goal
+    call_memory_agent("state_update", {
+        "session_id": session_id,
+        "current_goal": summary
+    })
+
     # Save the event_id as current_request_id for causal chain linking
     if result:
         # Parse result using safe_get - the memory agent returns JSON-RPC format

@@ -69,6 +69,67 @@ OUTCOME_PARTIAL_PATTERNS = [
     r"Could you clarify",
 ]
 
+# Thinking/reasoning patterns - these indicate Claude's thought process
+THINKING_PATTERNS = [
+    (r"Let me (\w+)", "approach"),           # "Let me check...", "Let me analyze..."
+    (r"I('ll| will) (\w+)", "intent"),       # "I'll start by...", "I will check..."
+    (r"First,? I", "sequence"),              # "First, I need to..."
+    (r"The reason is", "explanation"),       # Explaining why
+    (r"This is because", "explanation"),     # Explaining cause
+    (r"Based on", "reasoning"),              # "Based on the error..."
+    (r"Looking at", "analysis"),             # "Looking at the code..."
+    (r"I notice", "observation"),            # "I notice that..."
+    (r"It seems|It looks like", "inference"), # Making inferences
+    (r"The problem is|The issue is", "diagnosis"), # Diagnosing
+]
+
+# Decision patterns - indicate choices made
+DECISION_PATTERNS = [
+    (r"I('ll| will) use", "tool_choice"),
+    (r"I('m going to| am going to)", "action_plan"),
+    (r"Let's (\w+)", "collaborative_decision"),
+    (r"The best approach", "strategy"),
+    (r"Instead of .+, I", "alternative_choice"),
+]
+
+
+def extract_thinking(response_text: str) -> list:
+    """
+    Extract thinking/reasoning segments from Claude's response.
+
+    Returns:
+        list: List of (thinking_type, text) tuples
+    """
+    thinking_segments = []
+    sentences = re.split(r'[.!?]\s+', response_text)
+
+    for sentence in sentences[:10]:  # Only check first 10 sentences (A* heuristic)
+        for pattern, thinking_type in THINKING_PATTERNS:
+            if re.search(pattern, sentence, re.IGNORECASE):
+                thinking_segments.append((thinking_type, sentence[:150]))
+                break  # One match per sentence is enough
+
+    return thinking_segments[:5]  # Limit to 5 most important
+
+
+def extract_decisions(response_text: str) -> list:
+    """
+    Extract decision points from Claude's response.
+
+    Returns:
+        list: List of (decision_type, text) tuples
+    """
+    decisions = []
+    sentences = re.split(r'[.!?]\s+', response_text)
+
+    for sentence in sentences:
+        for pattern, decision_type in DECISION_PATTERNS:
+            if re.search(pattern, sentence, re.IGNORECASE):
+                decisions.append((decision_type, sentence[:150]))
+                break
+
+    return decisions[:5]  # Limit to 5 decisions
+
 
 def detect_outcome(response_text: str) -> tuple:
     """
@@ -226,6 +287,34 @@ def main():
 
     # Call auto-detect to analyze response for decisions/observations
     call_memory_agent("timeline_auto_detect", auto_detect_params)
+
+    # Extract and log thinking segments (the REASONING)
+    thinking_segments = extract_thinking(response_text)
+    for thinking_type, thinking_text in thinking_segments:
+        thinking_params = {
+            "session_id": session_id,
+            "event_type": "thinking",
+            "summary": f"[{thinking_type}] {thinking_text}"[:200],
+            "project_path": os.getcwd()
+        }
+        if root_event_id:
+            thinking_params["root_event_id"] = root_event_id
+            thinking_params["parent_event_id"] = root_event_id
+        call_memory_agent("timeline_log", thinking_params)
+
+    # Extract and log decision points (the CHOICES)
+    decisions = extract_decisions(response_text)
+    for decision_type, decision_text in decisions:
+        decision_params = {
+            "session_id": session_id,
+            "event_type": "decision",
+            "summary": f"[{decision_type}] {decision_text}"[:200],
+            "project_path": os.getcwd()
+        }
+        if root_event_id:
+            decision_params["root_event_id"] = root_event_id
+            decision_params["parent_event_id"] = root_event_id
+        call_memory_agent("timeline_log", decision_params)
 
     # Log an outcome event summarizing the result
     if root_event_id:

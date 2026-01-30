@@ -48,6 +48,17 @@ Edit `~/.claude/settings.json` and add:
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash|Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python ~/.claude/hooks/pre-tool-decision.py"
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Edit|Write|Bash|Read",
@@ -82,6 +93,8 @@ mkdir -p ~/.claude/hooks
 # Copy hooks
 cp hooks/grounding-hook.py ~/.claude/hooks/
 cp hooks/log-user-request.py ~/.claude/hooks/
+cp hooks/log-tool-use.py ~/.claude/hooks/
+cp hooks/pre-tool-decision.py ~/.claude/hooks/
 cp hooks/auto-detect-response.py ~/.claude/hooks/
 ```
 

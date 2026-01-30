@@ -50,7 +50,7 @@ from skills.summarize import (
 )
 
 # Timeline skills (Anti-Hallucination Layer)
-from skills.timeline import timeline_log, timeline_get, timeline_search, timeline_auto_detect
+from skills.timeline import timeline_log, timeline_get, timeline_search, timeline_auto_detect, timeline_chain
 from skills.state import state_get, state_update, state_init_session
 from skills.checkpoint import checkpoint_create, checkpoint_load, checkpoint_list
 from skills.grounding import (
@@ -612,6 +612,14 @@ async def execute_skill(
             response_text=params.get("response_text", query),
             project_path=params.get("project_path"),
             parent_event_id=params.get("parent_event_id")
+        )
+
+    elif skill_id == "timeline_chain":
+        return await timeline_chain(
+            db=db,
+            session_id=params.get("session_id") or session_id,
+            root_event_id=params.get("root_event_id"),
+            include_details=params.get("include_details", False)
         )
 
     # ============================================================

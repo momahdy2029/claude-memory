@@ -63,6 +63,15 @@ def load_session_data():
     return None
 
 
+def save_session_data(data: dict):
+    """Save session data to JSON file."""
+    session_file = Path(os.getcwd()) / ".claude_session"
+    try:
+        session_file.write_text(json.dumps(data, indent=2))
+    except (IOError, OSError) as e:
+        logger.warning(f"Failed to save session data: {e}")
+
+
 def get_session_id():
     """Get session ID from file."""
     data = load_session_data()
@@ -153,6 +162,11 @@ def main():
     # Get the current request ID for causal chain linking
     root_event_id = session_data.get("current_request_id")
 
+    # Get decision event ID (from PreToolUse hook) for proper chain linking
+    # Chain: user_request → decision → action
+    decision_event_id = session_data.get("current_decision_id")
+    pending_tool = session_data.get("pending_tool")
+
     tool_input = hook_input.get("tool_input") or hook_input.get("input") or {}
     tool_output = hook_input.get("tool_output") or hook_input.get("output") or ""
 
@@ -196,10 +210,20 @@ def main():
         "project_path": os.getcwd()
     }
 
-    # Add causal chain links if we have a root event
+    # Add causal chain links
+    # Chain: user_request → decision → action
     if root_event_id:
         log_params["root_event_id"] = root_event_id
-        log_params["parent_event_id"] = root_event_id  # Direct child of user request
+
+    # Link to decision event if this is the tool that was pre-logged
+    if decision_event_id and pending_tool == tool_name:
+        log_params["parent_event_id"] = decision_event_id
+        # Clear the pending decision after linking
+        session_data.pop("current_decision_id", None)
+        session_data.pop("pending_tool", None)
+        save_session_data(session_data)
+    elif root_event_id:
+        log_params["parent_event_id"] = root_event_id
 
     call_memory_agent("timeline_log", log_params)
 

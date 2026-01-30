@@ -173,6 +173,84 @@ async def timeline_search(
     }
 
 
+async def timeline_chain(
+    db: DatabaseService,
+    session_id: str,
+    root_event_id: int,
+    include_details: bool = False
+) -> Dict[str, Any]:
+    """
+    Get the full causal chain for a user request.
+
+    Shows the complete timeline:
+    user_request → thinking → decision → action → outcome
+
+    Args:
+        db: Database service instance
+        session_id: The session ID
+        root_event_id: The root user_request event ID
+        include_details: Whether to include full event details
+
+    Returns:
+        Dict with the causal chain as a tree structure
+    """
+    # Get all events linked to this root
+    events = await db.get_timeline_events(
+        session_id=session_id,
+        limit=100  # Get all related events
+    )
+
+    # Filter events linked to this root
+    chain_events = [
+        e for e in events
+        if e.get("root_event_id") == root_event_id or e.get("id") == root_event_id
+    ]
+
+    # Sort by sequence number
+    chain_events.sort(key=lambda x: x.get("sequence_num", 0))
+
+    # Build tree structure
+    def build_tree(parent_id: Optional[int]) -> List[Dict]:
+        children = []
+        for event in chain_events:
+            if event.get("parent_event_id") == parent_id or (parent_id is None and event.get("id") == root_event_id):
+                node = {
+                    "id": event.get("id"),
+                    "type": event.get("event_type"),
+                    "summary": event.get("summary", "")[:100],
+                    "sequence": event.get("sequence_num"),
+                }
+                if include_details:
+                    node["details"] = event.get("details")
+                    node["created_at"] = event.get("created_at")
+
+                # Recursively add children
+                node["children"] = build_tree(event.get("id"))
+                children.append(node)
+        return children
+
+    tree = build_tree(None)
+
+    # Also create a flat timeline view
+    flat_timeline = []
+    for event in chain_events:
+        flat_timeline.append({
+            "seq": event.get("sequence_num"),
+            "type": event.get("event_type"),
+            "summary": event.get("summary", "")[:80]
+        })
+
+    return {
+        "success": True,
+        "session_id": session_id,
+        "root_event_id": root_event_id,
+        "tree": tree,
+        "flat_timeline": flat_timeline,
+        "event_count": len(chain_events),
+        "message": f"Chain has {len(chain_events)} events"
+    }
+
+
 async def timeline_auto_detect(
     db: DatabaseService,
     embeddings: EmbeddingService,
