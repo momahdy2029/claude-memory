@@ -2349,39 +2349,51 @@
             container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
             try {
                 const typeFilter = document.getElementById('memoryTypeFilter').value;
-                const response = await fetch(`${API_URL}/a2a`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        jsonrpc: '2.0',
-                        id: Date.now(),
-                        method: 'tasks/send',
-                        params: { metadata: { skill_id: 'retrieve_memory', params: { project_path: currentProject, type: typeFilter || null, limit: 50 } } }
-                    })
-                });
+                // Use direct API endpoint - show all memories, optionally filter by type
+                let url = `${API_URL}/api/memories?limit=50`;
+                if (typeFilter) url += `&memory_type=${typeFilter}`;
+                // Optionally filter by project if one is selected
+                if (currentProject) url += `&project_path=${encodeURIComponent(currentProject)}`;
+
+                const response = await fetch(url);
                 const data = await response.json();
-                const result = JSON.parse(data.result?.artifacts?.[0]?.parts?.[0]?.text || '{}');
-                if (!result.memories?.length) {
+
+                // If no memories for current project, try loading all memories
+                if (!data.memories?.length && currentProject) {
+                    const allResponse = await fetch(`${API_URL}/api/memories?limit=50${typeFilter ? '&memory_type=' + typeFilter : ''}`);
+                    const allData = await allResponse.json();
+                    if (allData.memories?.length) {
+                        container.innerHTML = `<div style="padding: 12px; margin-bottom: 16px; background: var(--bg-tertiary); border-radius: 8px; color: var(--text-secondary); font-size: 13px;"><i class="fas fa-info-circle"></i> No memories for "${currentProject}". Showing all ${allData.memories.length} memories:</div>` +
+                            renderMemoryCards(allData.memories);
+                        return;
+                    }
+                }
+
+                if (!data.memories?.length) {
                     container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-brain" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>No memories found</div></div>`;
                     return;
                 }
-                container.innerHTML = result.memories.map(memory => `
-                    <div class="memory-card">
-                        <div class="memory-header">
-                            <span class="memory-type-badge memory-type-${memory.type}">${memory.type}</span>
-                            <span style="font-size: 12px; color: var(--text-muted);">${formatTime(memory.created_at)}</span>
-                        </div>
-                        <div class="memory-content">${escapeHtml(memory.content.substring(0, 300))}${memory.content.length > 300 ? '...' : ''}</div>
-                        <div class="memory-meta">
-                            ${memory.importance ? `<span><i class="fas fa-star"></i> Importance: ${memory.importance}</span>` : ''}
-                            ${memory.tags?.length ? `<span><i class="fas fa-tags"></i> ${memory.tags.slice(0, 3).join(', ')}</span>` : ''}
-                        </div>
-                    </div>
-                `).join('');
+                container.innerHTML = renderMemoryCards(data.memories);
             } catch (e) {
                 console.error('Error loading memories:', e);
                 container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-exclamation-triangle" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>Failed to load memories</div></div>`;
             }
+        }
+
+        function renderMemoryCards(memories) {
+            return memories.map(memory => `
+                <div class="memory-card">
+                    <div class="memory-header">
+                        <span class="memory-type-badge memory-type-${memory.type}">${memory.type}</span>
+                        <span style="font-size: 12px; color: var(--text-muted);">${formatTime(memory.created_at)}</span>
+                    </div>
+                    <div class="memory-content">${escapeHtml((memory.content || '').substring(0, 300))}${(memory.content || '').length > 300 ? '...' : ''}</div>
+                    <div class="memory-meta">
+                        ${memory.importance ? `<span><i class="fas fa-star"></i> Importance: ${memory.importance}</span>` : ''}
+                        ${memory.project_path ? `<span><i class="fas fa-folder"></i> ${memory.project_path.split(/[/\\]/).pop()}</span>` : ''}
+                    </div>
+                </div>
+            `).join('');
         }
 
         // Patterns
@@ -2390,32 +2402,27 @@
             container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
             try {
                 const typeFilter = document.getElementById('patternTypeFilter').value;
-                const response = await fetch(`${API_URL}/a2a`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        jsonrpc: '2.0',
-                        id: Date.now(),
-                        method: 'tasks/send',
-                        params: { metadata: { skill_id: 'search_patterns', params: { query: typeFilter || 'all patterns', limit: 30 } } }
-                    })
-                });
+                // Use direct API endpoint
+                let url = `${API_URL}/api/patterns?limit=30`;
+                if (typeFilter) url += `&problem_type=${typeFilter}`;
+
+                const response = await fetch(url);
                 const data = await response.json();
-                const result = JSON.parse(data.result?.artifacts?.[0]?.parts?.[0]?.text || '{}');
-                if (!result.patterns?.length) {
-                    container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-code" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>No patterns found</div></div>`;
+
+                if (!data.patterns?.length) {
+                    container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-code" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>No patterns stored yet</div><div style="font-size: 12px; margin-top: 8px;">Patterns are created when you solve problems successfully</div></div>`;
                     return;
                 }
-                container.innerHTML = result.patterns.map(pattern => `
+                container.innerHTML = data.patterns.map(pattern => `
                     <div class="pattern-card">
                         <div class="pattern-header">
-                            <span class="pattern-name">${escapeHtml(pattern.name)}</span>
-                            <span class="pattern-success-rate ${pattern.success_rate > 0.7 ? 'high' : 'medium'}">${Math.round((pattern.success_rate || 0.8) * 100)}% success</span>
+                            <span class="pattern-name">${escapeHtml(pattern.name || 'Unnamed Pattern')}</span>
+                            <span class="pattern-success-rate ${(pattern.success_count || 0) > 2 ? 'high' : 'medium'}">${pattern.success_count || 0} uses</span>
                         </div>
-                        <div class="pattern-solution">${escapeHtml(pattern.solution.substring(0, 400))}${pattern.solution.length > 400 ? '...' : ''}</div>
+                        <div class="pattern-solution">${escapeHtml((pattern.solution || '').substring(0, 400))}${(pattern.solution || '').length > 400 ? '...' : ''}</div>
                         <div class="pattern-tags">
                             ${pattern.problem_type ? `<span class="pattern-tag">${pattern.problem_type}</span>` : ''}
-                            ${(pattern.tech_context || []).slice(0, 3).map(t => `<span class="pattern-tag">${t}</span>`).join('')}
+                            ${(pattern.tech_context ? JSON.parse(pattern.tech_context) : []).slice(0, 3).map(t => `<span class="pattern-tag">${t}</span>`).join('')}
                         </div>
                     </div>
                 `).join('');
@@ -2432,29 +2439,24 @@
             const container = document.getElementById('searchResults');
             container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
             try {
-                const response = await fetch(`${API_URL}/a2a`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        jsonrpc: '2.0',
-                        id: Date.now(),
-                        method: 'tasks/send',
-                        params: { metadata: { skill_id: 'semantic_search', params: { query, project_path: currentProject, limit: 20 } } }
-                    })
-                });
+                // Use direct API endpoint for search
+                let url = `${API_URL}/api/search?query=${encodeURIComponent(query)}&limit=20`;
+                if (currentProject) url += `&project_path=${encodeURIComponent(currentProject)}`;
+
+                const response = await fetch(url);
                 const data = await response.json();
-                const result = JSON.parse(data.result?.artifacts?.[0]?.parts?.[0]?.text || '{}');
-                if (!result.memories?.length) {
+
+                if (!data.results?.length) {
                     container.innerHTML = `<div style="text-align: center; padding: 40px; color: var(--text-secondary);"><i class="fas fa-search" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>No results found for "${escapeHtml(query)}"</div></div>`;
                     return;
                 }
-                container.innerHTML = result.memories.map(memory => `
+                container.innerHTML = data.results.map(result => `
                     <div class="search-result">
                         <div class="search-result-header">
-                            <span class="memory-type-badge memory-type-${memory.type}">${memory.type}</span>
-                            <span class="search-result-score">${Math.round((memory.similarity || 0.8) * 100)}% match</span>
+                            <span class="memory-type-badge memory-type-${result.type || 'chunk'}">${result.type || 'memory'}</span>
+                            <span class="search-result-score">${Math.round((result.similarity || 0.8) * 100)}% match</span>
                         </div>
-                        <div class="search-result-content">${escapeHtml(memory.content)}</div>
+                        <div class="search-result-content">${escapeHtml(result.content || '')}</div>
                     </div>
                 `).join('');
                 addActivityItem('search', 'Search Performed', query.substring(0, 50));

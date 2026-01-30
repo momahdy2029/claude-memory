@@ -167,15 +167,56 @@ class ProcessManager:
             return False
 
     def is_running(self) -> bool:
-        """Check if the agent is running."""
+        """Check if the Memory Agent is actually running (not just port in use)."""
         if self.process and self.process.poll() is None:
             return True
-        return self.is_port_in_use()
+
+        # Actually check if Memory Agent API responds, not just port
+        try:
+            import urllib.request
+            req = urllib.request.Request(
+                f"http://localhost:{PORT}/api/stats",
+                headers={"User-Agent": "MemoryManager/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=2) as response:
+                if response.status == 200:
+                    return True
+        except:
+            pass
+
+        return False
+
+    def _kill_port_processes(self):
+        """Kill all processes using our port."""
+        try:
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            for line in result.stdout.split("\n"):
+                if f":{PORT}" in line and "LISTENING" in line:
+                    parts = line.split()
+                    if parts:
+                        pid = parts[-1]
+                        if pid.isdigit():
+                            subprocess.run(
+                                ["taskkill", "/F", "/PID", pid],
+                                capture_output=True,
+                                creationflags=subprocess.CREATE_NO_WINDOW
+                            )
+        except:
+            pass
 
     def start(self) -> tuple[bool, str]:
         """Start the Memory Agent."""
         if self.is_running():
             return False, "Agent is already running"
+
+        # If port is in use but agent isn't responding, kill zombie processes first
+        if self.is_port_in_use():
+            self._kill_port_processes()
+            time.sleep(1)
 
         if not PYTHON_EXE.exists():
             return False, f"Python not found at {PYTHON_EXE}"

@@ -1190,7 +1190,7 @@ async def api_get_timeline(
             query += " AND event_type = ?"
             params.append(event_type)
 
-        query += " ORDER BY timestamp DESC LIMIT ?"
+        query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
 
         events = await db.execute_query(query, params)
