@@ -2471,19 +2471,9 @@
                 const response = await fetch(url);
                 const data = await response.json();
 
-                // If no memories for current project, try loading all memories
-                if (!data.memories?.length && currentProject) {
-                    const allResponse = await fetch(`${API_URL}/api/memories?limit=50${typeFilter ? '&memory_type=' + typeFilter : ''}`);
-                    const allData = await allResponse.json();
-                    if (allData.memories?.length) {
-                        container.innerHTML = `<div style="padding: 12px; margin-bottom: 16px; background: var(--bg-tertiary); border-radius: 8px; color: var(--text-secondary); font-size: 13px;"><i class="fas fa-info-circle"></i> No memories for "${currentProject}". Showing all ${allData.memories.length} memories:</div>` +
-                            renderMemoryCards(allData.memories);
-                        return;
-                    }
-                }
-
                 if (!data.memories?.length) {
-                    container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-brain" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>No memories found</div></div>`;
+                    const projectName = currentProject ? currentProject.split(/[/\\]/).pop() : 'any project';
+                    container.innerHTML = `<div style="text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-brain" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i><div>No memories found for ${projectName}</div><div style="font-size: 12px; margin-top: 8px;">Select "All Projects" to see all memories</div></div>`;
                     return;
                 }
                 container.innerHTML = renderMemoryCards(data.memories);
