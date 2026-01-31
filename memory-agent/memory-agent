@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""
+Claude Memory Agent CLI
+
+Cross-platform command-line interface for managing the Memory Agent.
+
+Usage:
+    memory-agent start       Start the agent in background
+    memory-agent stop        Stop the running agent
+    memory-agent status      Check if agent is running
+    memory-agent dashboard   Open dashboard in browser
+    memory-agent install     Run installation wizard
+    memory-agent logs        Show recent log output
+"""
+import os
+import sys
+import argparse
+import subprocess
+import webbrowser
+from pathlib import Path
+
+# Agent directory
+AGENT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(AGENT_DIR))
+
+# Load config
+try:
+    from config import config
+    PORT = config.PORT
+    MEMORY_AGENT_URL = config.MEMORY_AGENT_URL
+except ImportError:
+    PORT = int(os.getenv("PORT", "8102"))
+    MEMORY_AGENT_URL = f"http://localhost:{PORT}"
+
+
+def is_running() -> bool:
+    """Check if agent is running."""
+    try:
+        import requests
+        r = requests.get(f"{MEMORY_AGENT_URL}/health", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def cmd_start():
+    """Start the agent in background."""
+    if is_running():
+        print(f"Memory Agent is already running at {MEMORY_AGENT_URL}")
+        return 0
+
+    print("Starting Memory Agent...")
+
+    if sys.platform == "win32":
+        # Windows: use start_daemon.py
+        subprocess.Popen(
+            [sys.executable, str(AGENT_DIR / "start_daemon.py")],
+            cwd=str(AGENT_DIR),
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        # Unix: use nohup
+        log_file = AGENT_DIR / "memory-agent.log"
+        subprocess.Popen(
+            f"nohup {sys.executable} main.py > {log_file} 2>&1 &",
+            shell=True,
+            cwd=str(AGENT_DIR)
+        )
+
+    # Wait for startup
+    import time
+    for i in range(10):
+        time.sleep(0.5)
+        if is_running():
+            print(f"Memory Agent started at {MEMORY_AGENT_URL}")
+            return 0
+
+    print("Warning: Agent may have failed to start. Check logs.")
+    return 1
+
+
+def cmd_stop():
+    """Stop the running agent."""
+    pid_file = AGENT_DIR / "memory-agent.pid"
+
+    if not is_running():
+        print("Memory Agent is not running")
+        # Clean up stale files
+        if pid_file.exists():
+            pid_file.unlink()
+        return 0
+
+    if pid_file.exists():
+        try:
+            pid = int(pid_file.read_text().strip())
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+            else:
+                os.kill(pid, 15)  # SIGTERM
+            print(f"Stopped Memory Agent (PID: {pid})")
+            pid_file.unlink()
+            return 0
+        except Exception as e:
+            print(f"Error stopping agent: {e}")
+            return 1
+
+    print("Could not find PID file. Try stopping manually.")
+    return 1
+
+
+def cmd_status():
+    """Check agent status."""
+    if is_running():
+        print(f"Memory Agent is RUNNING at {MEMORY_AGENT_URL}")
+
+        # Get stats if available
+        try:
+            import requests
+            r = requests.get(f"{MEMORY_AGENT_URL}/stats", timeout=2)
+            if r.status_code == 200:
+                stats = r.json()
+                print(f"  Memories: {stats.get('total_memories', 'N/A')}")
+                print(f"  Projects: {stats.get('total_projects', 'N/A')}")
+        except Exception:
+            pass
+
+        return 0
+    else:
+        print("Memory Agent is NOT RUNNING")
+        return 1
+
+
+def cmd_dashboard():
+    """Open dashboard in browser."""
+    url = f"{MEMORY_AGENT_URL}/dashboard"
+    print(f"Opening dashboard: {url}")
+    webbrowser.open(url)
+    return 0
+
+
+def cmd_install():
+    """Run installation wizard."""
+    install_script = AGENT_DIR / "install.py"
+    if install_script.exists():
+        subprocess.run([sys.executable, str(install_script)])
+    else:
+        print("Installation script not found")
+        return 1
+    return 0
+
+
+def cmd_logs(lines: int = 50):
+    """Show recent log output."""
+    log_file = AGENT_DIR / "memory-agent.log"
+    if not log_file.exists():
+        print("No log file found")
+        return 1
+
+    content = log_file.read_text()
+    log_lines = content.strip().split("\n")
+    for line in log_lines[-lines:]:
+        print(line)
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Claude Memory Agent CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # start
+    subparsers.add_parser("start", help="Start the agent in background")
+
+    # stop
+    subparsers.add_parser("stop", help="Stop the running agent")
+
+    # status
+    subparsers.add_parser("status", help="Check if agent is running")
+
+    # dashboard
+    subparsers.add_parser("dashboard", help="Open dashboard in browser")
+
+    # install
+    subparsers.add_parser("install", help="Run installation wizard")
+
+    # logs
+    logs_parser = subparsers.add_parser("logs", help="Show recent log output")
+    logs_parser.add_argument("-n", "--lines", type=int, default=50, help="Number of lines to show")
+
+    args = parser.parse_args()
+
+    if args.command == "start":
+        return cmd_start()
+    elif args.command == "stop":
+        return cmd_stop()
+    elif args.command == "status":
+        return cmd_status()
+    elif args.command == "dashboard":
+        return cmd_dashboard()
+    elif args.command == "install":
+        return cmd_install()
+    elif args.command == "logs":
+        return cmd_logs(args.lines)
+    else:
+        parser.print_help()
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

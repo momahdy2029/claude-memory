@@ -1655,8 +1655,9 @@
     <div class="toast-container" id="toastContainer"></div>
 
     <script>
-        const API_URL = 'http://localhost:8102';
-        const WS_URL = 'ws://localhost:8102/ws';
+        // Auto-detect server URL from current page location (works on any host/port)
+        const API_URL = window.location.origin || 'http://localhost:8102';
+        const WS_URL = (window.location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + (window.location.host || 'localhost:8102') + '/ws';
         let currentProject = null;
         let currentMemories = [];
         let projectConfig = null;

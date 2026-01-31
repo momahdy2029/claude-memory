@@ -77,7 +77,8 @@ def is_running():
     """Check if agent is already running via health endpoint."""
     try:
         import requests
-        r = requests.get("http://localhost:8102/health", timeout=2)
+        url = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
+        r = requests.get(f"{url}/health", timeout=2)
         return r.status_code == 200
     except Exception:
         return False

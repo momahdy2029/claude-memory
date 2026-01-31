@@ -4,7 +4,7 @@ AGENT_CARD = {
     "name": "Claude Memory Agent",
     "description": "Persistent semantic memory for Claude Code sessions with session timeline tracking for anti-hallucination. Stores memories, tracks session events, manages checkpoints, and provides grounding context.",
     "version": "2.0.0",
-    "url": "http://localhost:8100",
+    "url": "http://localhost:8102",
     "documentationUrl": "https://github.com/anthropics/claude-code",
     "capabilities": {
         "streaming": False,
@@ -357,6 +357,153 @@ AGENT_CARD = {
             "examples": [
                 "Is this statement grounded in our facts?",
                 "Verify this claim against stored knowledge"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        # ============================================================
+        # MOLTBOT-INSPIRED SKILLS (Human-Readable Transparency)
+        # ============================================================
+        {
+            "id": "daily_log_append",
+            "name": "Append to Daily Log",
+            "description": "Append an entry to today's daily log. Creates YYYY-MM-DD.md file in .claude/memory/. Entry types: decision, accomplishment, note, error.",
+            "tags": ["daily_log", "transparency", "moltbot"],
+            "examples": [
+                "Log a decision to today's log",
+                "Record an accomplishment"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "daily_log_append_session",
+            "name": "Append Session Summary to Daily Log",
+            "description": "Append a full session summary to the daily log. Includes decisions, accomplishments, errors solved, and notes.",
+            "tags": ["daily_log", "session", "transparency"],
+            "examples": [
+                "Add session summary to daily log",
+                "Log session end details"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "daily_log_read",
+            "name": "Read Daily Logs",
+            "description": "Read recent daily logs. Returns combined content from today and previous days.",
+            "tags": ["daily_log", "read", "transparency"],
+            "examples": [
+                "Show today's activity log",
+                "Read last 2 days of logs"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "daily_log_highlights",
+            "name": "Get Daily Log Highlights",
+            "description": "Get the most important entries from today's log for context injection. Returns decisions and accomplishments.",
+            "tags": ["daily_log", "highlights", "context"],
+            "examples": [
+                "Get today's highlights",
+                "What did we accomplish today?"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "sync_memory_md",
+            "name": "Sync MEMORY.md",
+            "description": "Sync high-importance memories to MEMORY.md. Includes anchors, key decisions (importance >= 7), proven patterns (success >= 3).",
+            "tags": ["memory_md", "sync", "transparency"],
+            "examples": [
+                "Update MEMORY.md with important facts",
+                "Sync core knowledge to markdown"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "read_memory_md",
+            "name": "Read MEMORY.md",
+            "description": "Read the MEMORY.md core facts file. Contains anchors, key decisions, proven patterns, and preferences.",
+            "tags": ["memory_md", "read", "transparency"],
+            "examples": [
+                "Show core facts from MEMORY.md",
+                "What are the established facts?"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "get_memory_md_summary",
+            "name": "Get MEMORY.md Summary",
+            "description": "Get a condensed summary of MEMORY.md for context injection. Returns essential facts in compact format.",
+            "tags": ["memory_md", "summary", "context"],
+            "examples": [
+                "Get core facts summary",
+                "Load MEMORY.md highlights"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "add_memory_md_fact",
+            "name": "Add Fact to MEMORY.md",
+            "description": "Add a fact directly to MEMORY.md. Sections: anchors, decisions, preferences.",
+            "tags": ["memory_md", "write", "transparency"],
+            "examples": [
+                "Add a verified fact to MEMORY.md",
+                "Record a key decision"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "check_flush_needed",
+            "name": "Check Flush Needed",
+            "description": "Check if pre-compaction flush is needed. Triggers if events > 50 or time > 30min since last flush.",
+            "tags": ["flush", "compaction", "transparency"],
+            "examples": [
+                "Check if we need to flush",
+                "Is memory export needed?"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "pre_compaction_flush",
+            "name": "Pre-Compaction Flush",
+            "description": "Export all important session data to a markdown file before context loss. Creates flush_YYYYMMDD_HHMMSS.md.",
+            "tags": ["flush", "compaction", "transparency"],
+            "examples": [
+                "Export session data before compaction",
+                "Create memory flush"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "list_flushes",
+            "name": "List Memory Flushes",
+            "description": "List available memory flush files for a project.",
+            "tags": ["flush", "list", "transparency"],
+            "examples": [
+                "Show memory flush history",
+                "List all flushes"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "read_flush",
+            "name": "Read Memory Flush",
+            "description": "Read a specific memory flush file or the most recent one.",
+            "tags": ["flush", "read", "transparency"],
+            "examples": [
+                "Read the last flush",
+                "Show flush from earlier today"
             ],
             "inputModes": ["text"],
             "outputModes": ["text"]

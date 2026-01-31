@@ -1,0 +1,2 @@
+# This file ensures the indexes directory is tracked by git
+# Index files themselves are gitignored as they are regenerated

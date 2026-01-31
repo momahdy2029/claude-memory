@@ -34,8 +34,12 @@ VENV_DIR = AGENT_DIR / "venv"
 PYTHON_EXE = VENV_DIR / "Scripts" / "python.exe"
 MAIN_SCRIPT = AGENT_DIR / "main.py"
 SETTINGS_FILE = AGENT_DIR / "manager_settings.json"
-DASHBOARD_URL = "http://localhost:8102/dashboard"
-PORT = 8102
+
+# Load port from environment or use default
+from dotenv import load_dotenv
+load_dotenv(AGENT_DIR / ".env")
+PORT = int(os.getenv("PORT", "8102"))
+DASHBOARD_URL = os.getenv("MEMORY_AGENT_URL", f"http://localhost:{PORT}") + "/dashboard"
 
 # Color scheme (Dark theme matching dashboard)
 COLORS = {

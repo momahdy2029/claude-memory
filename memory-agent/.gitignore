@@ -1,0 +1,66 @@
+# =============================================================================
+# Claude Memory Agent - Git Ignore
+# =============================================================================
+# User-specific files that should not be committed
+
+# Environment configuration (contains user paths)
+.env
+
+# Database files
+*.db
+*.db-shm
+*.db-wal
+*.db.backup_*
+
+# Lock and PID files
+*.lock
+*.pid
+
+# Log files
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Session files
+.claude_session
+
+# Backup files
+*.bak
+*.backup
+
+# Test output
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Index files (can be regenerated)
+indexes/*.index
+indexes/*_ids.json
+
+# Keep the indexes directory structure
+!indexes/.gitkeep
