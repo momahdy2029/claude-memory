@@ -1,6 +1,6 @@
 {
   "name": "claude-memory-agent",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Persistent semantic memory system for Claude Code sessions with anti-hallucination grounding",
   "keywords": [
     "claude",
@@ -12,16 +12,8 @@
     "embeddings",
     "ollama"
   ],
-  "author": "Your Name",
+  "author": "Claude Memory Agent Contributors",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/yourusername/claude-memory-agent.git"
-  },
-  "homepage": "https://github.com/yourusername/claude-memory-agent#readme",
-  "bugs": {
-    "url": "https://github.com/yourusername/claude-memory-agent/issues"
-  },
   "bin": {
     "claude-memory-agent": "./bin/cli.js",
     "claude-memory": "./bin/cli.js"

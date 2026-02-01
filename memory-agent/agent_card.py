@@ -248,6 +248,69 @@ AGENT_CARD = {
             "outputModes": ["text"]
         },
         # ============================================================
+        # SELF-CORRECTING CONFIDENCE SKILLS
+        # ============================================================
+        {
+            "id": "memory_worked",
+            "name": "Report Memory Worked",
+            "description": "Report that a memory's solution worked. Increases confidence by 0.15 and resets failure count. Use this when a retrieved solution successfully solved the problem.",
+            "tags": ["confidence", "feedback", "learning"],
+            "examples": [
+                "That solution from memory 42 worked perfectly",
+                "Report success for the HVP import fix"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "memory_failed",
+            "name": "Report Memory Failed",
+            "description": "Report that a memory's solution failed. Decreases confidence by 0.2. After 3 consecutive failures, memory is marked as unreliable and excluded from search.",
+            "tags": ["confidence", "feedback", "learning"],
+            "examples": [
+                "That solution from memory 42 didn't work",
+                "Report failure for the caching fix"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "get_reliability_stats",
+            "name": "Get Reliability Stats",
+            "description": "Get detailed reliability statistics for a memory including confidence, times worked/failed, success rate, and outcome history.",
+            "tags": ["confidence", "stats", "reliability"],
+            "examples": [
+                "What's the reliability of memory 42?",
+                "Show confidence stats for this solution"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "get_unreliable_memories",
+            "name": "Get Unreliable Memories",
+            "description": "Get all memories marked as unreliable (failure_count >= 3). These are excluded from search by default.",
+            "tags": ["confidence", "list", "unreliable"],
+            "examples": [
+                "Show unreliable memories",
+                "List failed solutions"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "reset_memory_reliability",
+            "name": "Reset Memory Reliability",
+            "description": "Reset a memory's reliability stats (admin function). Useful when a memory has been fixed or updated and should be given a fresh chance.",
+            "tags": ["confidence", "admin", "reset"],
+            "examples": [
+                "Give memory 42 a fresh start",
+                "Reset reliability for the fixed solution"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        # ============================================================
         # CLAUDE.MD MANAGEMENT SKILLS
         # ============================================================
         {
@@ -504,6 +567,129 @@ AGENT_CARD = {
             "examples": [
                 "Read the last flush",
                 "Show flush from earlier today"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        # ============================================================
+        # CURATOR AGENT SKILLS (Graph Exploration & Maintenance)
+        # ============================================================
+        {
+            "id": "curator_explore",
+            "name": "Curator: Explore Graph",
+            "description": "Explore the memory graph from a starting node using BFS or DFS traversal. Returns connected nodes, edges, clusters, and insights about the subgraph.",
+            "tags": ["curator", "graph", "exploration"],
+            "examples": [
+                "Explore the graph from memory 42",
+                "Show connected memories 3 levels deep"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_find_duplicates",
+            "name": "Curator: Find Duplicates",
+            "description": "Find semantically similar (duplicate) memories using embedding similarity. Returns duplicate clusters with merge recommendations.",
+            "tags": ["curator", "duplicates", "cleanup"],
+            "examples": [
+                "Find duplicate memories",
+                "Show potential duplicates above 0.9 similarity"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_suggest_links",
+            "name": "Curator: Suggest Links",
+            "description": "Suggest missing relationships between memories based on semantic similarity. Returns potential links with confidence scores and relationship types.",
+            "tags": ["curator", "links", "relationships"],
+            "examples": [
+                "Suggest links for memory 42",
+                "Find potential relationships in this project"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_merge",
+            "name": "Curator: Merge Memories",
+            "description": "Merge duplicate memories into one. Transfers all relationships to the kept memory and archives the removed ones.",
+            "tags": ["curator", "merge", "cleanup"],
+            "examples": [
+                "Merge memory 43 into 42",
+                "Combine duplicate memories"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_get_summary",
+            "name": "Curator: Get Context Summary",
+            "description": "Generate a curated context summary for a query. Returns relevant memories organized by type with graph context and pending reviews.",
+            "tags": ["curator", "context", "summary"],
+            "examples": [
+                "Get curated context about authentication",
+                "Summarize what we know about the API"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_run_maintenance",
+            "name": "Curator: Run Maintenance",
+            "description": "Run curator maintenance tasks: dedup (find duplicates), orphans (find unconnected), links (suggest relationships), decay (reduce unused memory confidence), quality (score all memories).",
+            "tags": ["curator", "maintenance", "cleanup"],
+            "examples": [
+                "Run curator maintenance",
+                "Run dedup and orphan detection"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_get_report",
+            "name": "Curator: Get Report",
+            "description": "Get the latest curator maintenance report with findings, actions taken, and recommendations.",
+            "tags": ["curator", "report", "status"],
+            "examples": [
+                "Show latest curator report",
+                "What did the curator find?"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_get_status",
+            "name": "Curator: Get Status",
+            "description": "Get current curator agent status including total memories, relationships, orphan count, and connection ratio.",
+            "tags": ["curator", "status", "stats"],
+            "examples": [
+                "Show curator status",
+                "How is the memory graph doing?"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_score_quality",
+            "name": "Curator: Score Quality",
+            "description": "Calculate quality scores for memories based on importance, confidence, usage, decay, and connections. Identifies high-quality and needs-attention memories.",
+            "tags": ["curator", "quality", "scoring"],
+            "examples": [
+                "Score memory quality for this project",
+                "Which memories need attention?"
+            ],
+            "inputModes": ["text"],
+            "outputModes": ["text"]
+        },
+        {
+            "id": "curator_find_orphans",
+            "name": "Curator: Find Orphans",
+            "description": "Find memories with no relationships (orphans). These may need linking or archiving.",
+            "tags": ["curator", "orphans", "cleanup"],
+            "examples": [
+                "Find orphan memories",
+                "Show unconnected memories"
             ],
             "inputModes": ["text"],
             "outputModes": ["text"]

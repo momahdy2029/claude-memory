@@ -992,6 +992,148 @@
             font-size: 14px;
             color: var(--text-primary);
         }
+        /* Session Review Styles */
+        .review-session-summary {
+            display: flex;
+            gap: 24px;
+            padding: 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            margin-bottom: 16px;
+        }
+        .review-stat {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 0 20px;
+            border-right: 1px solid var(--border-color);
+        }
+        .review-stat:last-child { border-right: none; }
+        .review-stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .review-stat-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+        .review-quick-actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .review-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 12px;
+            display: flex;
+            gap: 16px;
+            align-items: flex-start;
+            transition: all 0.2s;
+        }
+        .review-card:hover {
+            border-color: var(--accent-blue);
+        }
+        .review-card.decision-keep {
+            border-left: 4px solid var(--accent-green);
+            background: linear-gradient(135deg, rgba(63, 185, 80, 0.05) 0%, transparent 100%);
+        }
+        .review-card.decision-partial {
+            border-left: 4px solid var(--accent-yellow);
+            background: linear-gradient(135deg, rgba(210, 153, 34, 0.05) 0%, transparent 100%);
+        }
+        .review-card.decision-discard {
+            border-left: 4px solid var(--accent-red);
+            background: linear-gradient(135deg, rgba(248, 81, 73, 0.05) 0%, transparent 100%);
+            opacity: 0.7;
+        }
+        .review-card-main {
+            flex: 1;
+            min-width: 0;
+        }
+        .review-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 8px;
+            gap: 12px;
+        }
+        .review-card-type {
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .review-card-content {
+            font-size: 13px;
+            line-height: 1.6;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+        }
+        .review-card-meta {
+            display: flex;
+            gap: 16px;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+        .review-card-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .review-btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            white-space: nowrap;
+        }
+        .review-btn:hover {
+            border-color: var(--text-secondary);
+            color: var(--text-primary);
+        }
+        .review-btn.active-keep {
+            background: rgba(63, 185, 80, 0.2);
+            border-color: var(--accent-green);
+            color: var(--accent-green);
+        }
+        .review-btn.active-partial {
+            background: rgba(210, 153, 34, 0.2);
+            border-color: var(--accent-yellow);
+            color: var(--accent-yellow);
+        }
+        .review-btn.active-discard {
+            background: rgba(248, 81, 73, 0.2);
+            border-color: var(--accent-red);
+            color: var(--accent-red);
+        }
+        .review-suggestion {
+            font-size: 10px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            background: rgba(163, 113, 247, 0.15);
+            color: var(--accent-purple);
+            margin-left: 8px;
+        }
         /* Pattern Cards */
         .pattern-card {
             background: var(--bg-card);
@@ -1371,7 +1513,315 @@
         @media (max-width: 1200px) {
             .two-column { grid-template-columns: 1fr; }
         }
+        /* Knowledge Graph */
+        .graph-container {
+            display: grid;
+            grid-template-columns: 220px 1fr;
+            grid-template-rows: 1fr 180px;
+            gap: 16px;
+            height: calc(100vh - 250px);
+            min-height: 500px;
+        }
+        .graph-filters {
+            grid-row: 1 / 3;
+            background: var(--bg-card);
+            border-radius: 12px;
+            padding: 16px;
+            border: 1px solid var(--border-color);
+            overflow-y: auto;
+        }
+        .graph-filters h4 {
+            color: var(--text-primary);
+            margin-bottom: 12px;
+            font-size: 14px;
+        }
+        .filter-group {
+            margin-bottom: 20px;
+        }
+        .filter-group > label {
+            display: block;
+            color: var(--text-secondary);
+            font-size: 12px;
+            margin-bottom: 8px;
+            font-weight: 500;
+        }
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+            cursor: pointer;
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+        .checkbox-group input[type="checkbox"] {
+            accent-color: var(--accent-blue);
+        }
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .dot-error { background: var(--accent-red); }
+        .dot-decision { background: var(--accent-blue); }
+        .dot-code { background: var(--accent-green); }
+        .dot-pattern { background: var(--accent-purple); }
+        .dot-session { background: var(--accent-cyan); }
+        .dot-chunk { background: var(--accent-yellow); }
+        .dot-preference { background: var(--accent-pink); }
+
+        .graph-canvas-container {
+            background: var(--bg-card);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            overflow: hidden;
+            position: relative;
+        }
+        #graph-canvas {
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+        #graph-canvas:active { cursor: grabbing; }
+
+        .graph-details {
+            grid-column: 2;
+            background: var(--bg-card);
+            border-radius: 12px;
+            border: 1px solid var(--border-color);
+            padding: 16px;
+            overflow-y: auto;
+        }
+        .graph-details h4 {
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+        .graph-details .meta {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        .graph-details .meta span {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        .graph-details .content {
+            background: var(--bg-secondary);
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 13px;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            max-height: 100px;
+            overflow-y: auto;
+        }
+        .graph-details .relationships {
+            margin-top: 12px;
+        }
+        .graph-details .rel-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 8px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            margin-bottom: 4px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .graph-details .rel-item:hover {
+            background: var(--bg-secondary);
+        }
+        .rel-arrow { color: var(--accent-blue); }
+
+        #graph-search {
+            width: 100%;
+            padding: 8px 12px;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 13px;
+        }
+        #graph-search:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+        .graph-stats { font-size: 12px; color: var(--text-secondary); }
+        .graph-stats .stat-row { display: flex; justify-content: space-between; padding: 4px 0; }
+
+        /* Graph node and edge styles */
+        .node circle {
+            stroke-width: 2px;
+            cursor: pointer;
+            transition: r 0.2s;
+        }
+        .node:hover circle { r: 12; }
+        .node.highlighted circle {
+            stroke: var(--accent-yellow);
+            stroke-width: 3px;
+        }
+        .node text {
+            font-size: 10px;
+            fill: var(--text-secondary);
+            pointer-events: none;
+        }
+        .node.selected circle {
+            stroke: white;
+            stroke-width: 3px;
+        }
+        .link {
+            fill: none;
+            stroke-opacity: 0.6;
+        }
+        .link.fixes { stroke: var(--accent-green); }
+        .link.caused_by { stroke: var(--accent-orange); }
+        .link.supports { stroke: var(--accent-blue); }
+        .link.contradicts { stroke: var(--accent-red); stroke-dasharray: 5,5; }
+        .link.related { stroke: var(--text-muted); stroke-opacity: 0.3; }
+        .link-label {
+            font-size: 9px;
+            fill: var(--text-muted);
+        }
+        .graph-loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: var(--text-secondary);
+        }
+        .graph-empty {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            color: var(--text-secondary);
+        }
+        .graph-empty i {
+            font-size: 48px;
+            opacity: 0.3;
+            margin-bottom: 16px;
+        }
+
+        /* Curator Panel Styles */
+        .curator-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 20px;
+        }
+        .curator-panel h4 {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+            color: var(--accent-purple);
+        }
+        .curator-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 12px;
+        }
+        .curator-btn {
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .curator-btn:hover {
+            border-color: var(--accent-purple);
+            color: var(--accent-purple);
+            background: rgba(163, 113, 247, 0.1);
+        }
+        .curator-btn.active {
+            border-color: var(--accent-purple);
+            background: var(--accent-purple);
+            color: white;
+        }
+        .curator-status {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+            gap: 12px;
+        }
+        .curator-stat {
+            text-align: center;
+            padding: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+        }
+        .curator-stat-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+        .curator-stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+        .curator-stat.warning .curator-stat-value {
+            color: var(--accent-yellow);
+        }
+        .curator-findings {
+            margin-top: 12px;
+            padding: 12px;
+            background: var(--bg-tertiary);
+            border-radius: 8px;
+            max-height: 150px;
+            overflow-y: auto;
+        }
+        .curator-finding {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 0;
+            font-size: 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .curator-finding:last-child {
+            border-bottom: none;
+        }
+        .curator-finding i {
+            width: 20px;
+            text-align: center;
+        }
+        .curator-finding.duplicate i { color: var(--accent-yellow); }
+        .curator-finding.orphan i { color: var(--accent-red); }
+        .curator-finding.suggestion i { color: var(--accent-blue); }
+
+        /* Graph node states */
+        .node.duplicate circle {
+            stroke: var(--accent-yellow) !important;
+            stroke-width: 3px;
+            stroke-dasharray: 4,2;
+        }
+        .node.orphan circle {
+            stroke: var(--accent-red) !important;
+            stroke-width: 3px;
+        }
+        .node.low-quality circle {
+            opacity: 0.5;
+        }
+        .link.suggested {
+            stroke: var(--accent-purple) !important;
+            stroke-dasharray: 8,4;
+            stroke-opacity: 0.8;
+        }
     </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
 </head>
 <body>
     <div class="bg-animation"></div>
@@ -1474,6 +1924,12 @@
             </div>
             <div class="tab" data-tab="activity" onclick="switchTab('activity')">
                 <i class="fas fa-rss"></i> Activity
+            </div>
+            <div class="tab" data-tab="review" onclick="switchTab('review')">
+                <i class="fas fa-clipboard-check"></i> Review
+            </div>
+            <div class="tab" data-tab="graph" onclick="switchTab('graph')">
+                <i class="fas fa-project-diagram"></i> Graph
             </div>
         </div>
 
@@ -1647,6 +2103,175 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Session Review Tab -->
+        <div class="tab-content" id="review-tab">
+            <div class="section-header">
+                <div class="section-title"><i class="fas fa-clipboard-check"></i> Session Memory Review</div>
+                <div class="section-actions">
+                    <select id="reviewSessionSelect" onchange="loadSessionForReview()" style="padding: 8px 16px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--text-primary); font-size: 13px; min-width: 300px;">
+                        <option value="">Select a session to review...</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="loadRecentSessions()"><i class="fas fa-sync"></i> Refresh</button>
+                </div>
+            </div>
+
+            <!-- Session Info -->
+            <div id="reviewSessionInfo" style="display: none; margin-bottom: 24px;">
+                <div class="review-session-summary">
+                    <div class="review-stat">
+                        <span class="review-stat-value" id="reviewTotalCount">0</span>
+                        <span class="review-stat-label">Total Memories</span>
+                    </div>
+                    <div class="review-stat">
+                        <span class="review-stat-value" id="reviewKeepCount" style="color: var(--accent-green);">0</span>
+                        <span class="review-stat-label">Keep</span>
+                    </div>
+                    <div class="review-stat">
+                        <span class="review-stat-value" id="reviewPartialCount" style="color: var(--accent-yellow);">0</span>
+                        <span class="review-stat-label">Partial</span>
+                    </div>
+                    <div class="review-stat">
+                        <span class="review-stat-value" id="reviewDiscardCount" style="color: var(--accent-red);">0</span>
+                        <span class="review-stat-label">Discard</span>
+                    </div>
+                </div>
+
+                <!-- Quick Actions -->
+                <div class="review-quick-actions">
+                    <button class="btn btn-secondary" onclick="applyBulkDecision('keep')"><i class="fas fa-check-double"></i> Keep All</button>
+                    <button class="btn btn-secondary" onclick="applyBulkDecision('partial')"><i class="fas fa-question-circle"></i> Mark All Partial</button>
+                    <button class="btn btn-secondary" onclick="applyBulkDecision('discard')"><i class="fas fa-trash-alt"></i> Discard All</button>
+                    <button class="btn btn-secondary" onclick="applySuggestions()"><i class="fas fa-magic"></i> Apply Suggestions</button>
+                    <button class="btn btn-primary" onclick="submitReviews()"><i class="fas fa-save"></i> Submit Reviews</button>
+                </div>
+            </div>
+
+            <!-- Review List -->
+            <div id="reviewListContainer">
+                <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                    <i class="fas fa-clipboard-check" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
+                    <div>Select a session to review its memories</div>
+                    <div style="font-size: 12px; margin-top: 8px;">Review what Claude learned and discard incorrect solutions</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Knowledge Graph Tab -->
+        <div class="tab-content" id="graph-tab">
+            <div class="section-header">
+                <div class="section-title"><i class="fas fa-project-diagram"></i> Knowledge Graph</div>
+                <div class="section-actions">
+                    <button class="btn btn-secondary" onclick="refreshGraph()">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                    <button class="btn btn-secondary" onclick="resetGraphZoom()">
+                        <i class="fas fa-compress-arrows-alt"></i> Reset Zoom
+                    </button>
+                </div>
+            </div>
+
+            <!-- Curator Panel -->
+            <div class="curator-panel" id="curatorPanel">
+                <h4><i class="fas fa-magic"></i> Memory Curator Agent</h4>
+                <div class="curator-actions">
+                    <button class="curator-btn" onclick="runCuratorTask('duplicates')" title="Find duplicate memories">
+                        <i class="fas fa-clone"></i> Find Duplicates
+                    </button>
+                    <button class="curator-btn" onclick="runCuratorTask('orphans')" title="Find unconnected memories">
+                        <i class="fas fa-unlink"></i> Find Orphans
+                    </button>
+                    <button class="curator-btn" onclick="runCuratorTask('suggest-links')" title="Suggest relationships">
+                        <i class="fas fa-link"></i> Suggest Links
+                    </button>
+                    <button class="curator-btn" onclick="runCuratorTask('quality')" title="Score memory quality">
+                        <i class="fas fa-star"></i> Score Quality
+                    </button>
+                    <button class="curator-btn" onclick="runCuratorMaintenance()" title="Run full maintenance">
+                        <i class="fas fa-tools"></i> Run Maintenance
+                    </button>
+                    <button class="curator-btn" id="toggleOverlayBtn" onclick="toggleCuratorOverlay()" title="Show/hide curator findings on graph">
+                        <i class="fas fa-eye"></i> Overlay
+                    </button>
+                </div>
+                <div class="curator-status" id="curatorStatus">
+                    <div class="curator-stat">
+                        <div class="curator-stat-value" id="curatorMemories">-</div>
+                        <div class="curator-stat-label">Memories</div>
+                    </div>
+                    <div class="curator-stat">
+                        <div class="curator-stat-value" id="curatorRelationships">-</div>
+                        <div class="curator-stat-label">Relationships</div>
+                    </div>
+                    <div class="curator-stat" id="curatorOrphansStat">
+                        <div class="curator-stat-value" id="curatorOrphans">-</div>
+                        <div class="curator-stat-label">Orphans</div>
+                    </div>
+                    <div class="curator-stat">
+                        <div class="curator-stat-value" id="curatorConnectivity">-</div>
+                        <div class="curator-stat-label">Connectivity</div>
+                    </div>
+                </div>
+                <div class="curator-findings" id="curatorFindings" style="display: none;">
+                    <p class="muted">Run a curator task to see findings...</p>
+                </div>
+            </div>
+
+            <div class="graph-container">
+                <!-- Left: Filter Panel -->
+                <div class="graph-filters">
+                    <h4>Filters</h4>
+
+                    <div class="filter-group">
+                        <label>Relationships</label>
+                        <div class="checkbox-group">
+                            <label><input type="checkbox" id="rel-fixes" checked> fixes</label>
+                            <label><input type="checkbox" id="rel-caused_by" checked> caused_by</label>
+                            <label><input type="checkbox" id="rel-supports" checked> supports</label>
+                            <label><input type="checkbox" id="rel-contradicts" checked> contradicts</label>
+                            <label><input type="checkbox" id="rel-related" checked> related</label>
+                        </div>
+                    </div>
+
+                    <div class="filter-group">
+                        <label>Node Types</label>
+                        <div class="checkbox-group">
+                            <label><input type="checkbox" id="type-error" checked> <span class="dot dot-error"></span> error</label>
+                            <label><input type="checkbox" id="type-decision" checked> <span class="dot dot-decision"></span> decision</label>
+                            <label><input type="checkbox" id="type-code" checked> <span class="dot dot-code"></span> code</label>
+                            <label><input type="checkbox" id="type-pattern" checked> <span class="dot dot-pattern"></span> pattern</label>
+                            <label><input type="checkbox" id="type-session" checked> <span class="dot dot-session"></span> session</label>
+                            <label><input type="checkbox" id="type-chunk" checked> <span class="dot dot-chunk"></span> chunk</label>
+                            <label><input type="checkbox" id="type-preference" checked> <span class="dot dot-preference"></span> preference</label>
+                        </div>
+                    </div>
+
+                    <div class="filter-group">
+                        <label>Search</label>
+                        <input type="text" id="graph-search" placeholder="Highlight nodes..." onkeyup="highlightGraphNodes(this.value)">
+                    </div>
+
+                    <div class="filter-group graph-stats">
+                        <h4>Statistics</h4>
+                        <div id="graph-stats">Loading...</div>
+                    </div>
+                </div>
+
+                <!-- Center: Graph Canvas -->
+                <div class="graph-canvas-container">
+                    <svg id="graph-canvas"></svg>
+                    <div class="graph-loading" id="graph-loading">
+                        <div class="spinner"></div>
+                        <div style="margin-top: 12px;">Loading graph...</div>
+                    </div>
+                </div>
+
+                <!-- Bottom: Detail Panel -->
+                <div class="graph-details" id="graph-details">
+                    <p class="muted">Click a node to view details</p>
                 </div>
             </div>
         </div>
@@ -2652,6 +3277,924 @@
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') closeMemoryModal();
         });
+
+        // ============================================================
+        // SESSION REVIEW FUNCTIONALITY
+        // ============================================================
+
+        let reviewSessions = [];
+        let currentReviewSession = null;
+        let reviewMemories = [];
+        let reviewDecisions = {};
+        let reviewSuggestions = {};
+
+        async function loadRecentSessions() {
+            const select = document.getElementById('reviewSessionSelect');
+            try {
+                let url = `${API_URL}/api/sessions/recent?limit=20`;
+                if (currentProject) url += `&project_path=${encodeURIComponent(currentProject)}`;
+
+                const response = await fetch(url);
+                const data = await response.json();
+
+                if (!data.success || !data.sessions?.length) {
+                    select.innerHTML = '<option value="">No sessions found</option>';
+                    return;
+                }
+
+                reviewSessions = data.sessions;
+                select.innerHTML = '<option value="">Select a session to review...</option>' +
+                    data.sessions.map(s => {
+                        const date = new Date(s.ended_at || s.started_at).toLocaleDateString();
+                        const time = new Date(s.ended_at || s.started_at).toLocaleTimeString();
+                        const pending = s.pending_count || 0;
+                        const project = s.project_name || s.project_path?.split(/[/\\]/).pop() || 'Unknown';
+                        return `<option value="${s.session_id}">[${date} ${time}] ${project} - ${s.memory_count} memories (${pending} pending)</option>`;
+                    }).join('');
+            } catch (e) {
+                console.error('Error loading sessions:', e);
+                select.innerHTML = '<option value="">Error loading sessions</option>';
+            }
+        }
+
+        async function loadSessionForReview() {
+            const sessionId = document.getElementById('reviewSessionSelect').value;
+            if (!sessionId) {
+                document.getElementById('reviewSessionInfo').style.display = 'none';
+                document.getElementById('reviewListContainer').innerHTML = `
+                    <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                        <i class="fas fa-clipboard-check" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
+                        <div>Select a session to review its memories</div>
+                    </div>`;
+                return;
+            }
+
+            currentReviewSession = sessionId;
+            const container = document.getElementById('reviewListContainer');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+
+            try {
+                // Get session memories
+                const memResponse = await fetch(`${API_URL}/api/session/${sessionId}/memories`);
+                const memData = await memResponse.json();
+
+                if (!memData.success) throw new Error(memData.error);
+
+                reviewMemories = memData.memories || [];
+
+                // Get suggestions
+                const suggResponse = await fetch(`${API_URL}/api/session/${sessionId}/suggestions`);
+                const suggData = await suggResponse.json();
+
+                reviewSuggestions = {};
+                if (suggData.success && suggData.suggestions) {
+                    suggData.suggestions.forEach(s => {
+                        reviewSuggestions[s.memory_id] = s;
+                    });
+                }
+
+                // Initialize decisions from suggestions
+                reviewDecisions = {};
+                reviewMemories.forEach(m => {
+                    const suggestion = reviewSuggestions[m.id];
+                    reviewDecisions[m.id] = suggestion?.suggested_decision || 'partial';
+                });
+
+                // Show session info
+                document.getElementById('reviewSessionInfo').style.display = 'block';
+                updateReviewCounts();
+
+                // Render memory cards
+                renderReviewCards();
+
+            } catch (e) {
+                console.error('Error loading session:', e);
+                container.innerHTML = `
+                    <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                        <i class="fas fa-exclamation-triangle" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
+                        <div>Failed to load session: ${e.message}</div>
+                    </div>`;
+            }
+        }
+
+        function updateReviewCounts() {
+            const total = reviewMemories.length;
+            let keep = 0, partial = 0, discard = 0;
+
+            Object.values(reviewDecisions).forEach(d => {
+                if (d === 'keep') keep++;
+                else if (d === 'partial') partial++;
+                else if (d === 'discard') discard++;
+            });
+
+            document.getElementById('reviewTotalCount').textContent = total;
+            document.getElementById('reviewKeepCount').textContent = keep;
+            document.getElementById('reviewPartialCount').textContent = partial;
+            document.getElementById('reviewDiscardCount').textContent = discard;
+        }
+
+        function renderReviewCards() {
+            const container = document.getElementById('reviewListContainer');
+
+            if (!reviewMemories.length) {
+                container.innerHTML = `
+                    <div style="text-align: center; padding: 60px; color: var(--text-secondary);">
+                        <i class="fas fa-check-circle" style="font-size: 48px; opacity: 0.3; margin-bottom: 16px;"></i>
+                        <div>No memories to review in this session</div>
+                    </div>`;
+                return;
+            }
+
+            container.innerHTML = reviewMemories.map(m => {
+                const decision = reviewDecisions[m.id] || 'partial';
+                const suggestion = reviewSuggestions[m.id];
+                const content = m.content?.substring(0, 300) || 'No content';
+                const typeClass = `memory-type-${m.type || 'chunk'}`;
+
+                return `
+                    <div class="review-card decision-${decision}" id="review-card-${m.id}">
+                        <div class="review-card-main">
+                            <div class="review-card-header">
+                                <span class="review-card-type ${typeClass}">${m.type || 'chunk'}</span>
+                                ${suggestion ? `<span class="review-suggestion"><i class="fas fa-magic"></i> Suggested: ${suggestion.suggested_decision}</span>` : ''}
+                            </div>
+                            <div class="review-card-content">${escapeHtml(content)}${content.length < (m.content?.length || 0) ? '...' : ''}</div>
+                            <div class="review-card-meta">
+                                <span><i class="fas fa-star"></i> Importance: ${m.importance || 5}</span>
+                                <span><i class="fas fa-chart-line"></i> Confidence: ${(m.confidence || 0.5).toFixed(2)}</span>
+                                <span><i class="fas fa-clock"></i> ${formatTime(m.created_at)}</span>
+                            </div>
+                        </div>
+                        <div class="review-card-actions">
+                            <button class="review-btn ${decision === 'keep' ? 'active-keep' : ''}" onclick="setDecision(${m.id}, 'keep')">
+                                <i class="fas fa-check"></i> Keep
+                            </button>
+                            <button class="review-btn ${decision === 'partial' ? 'active-partial' : ''}" onclick="setDecision(${m.id}, 'partial')">
+                                <i class="fas fa-question"></i> Partial
+                            </button>
+                            <button class="review-btn ${decision === 'discard' ? 'active-discard' : ''}" onclick="setDecision(${m.id}, 'discard')">
+                                <i class="fas fa-times"></i> Discard
+                            </button>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function setDecision(memoryId, decision) {
+            reviewDecisions[memoryId] = decision;
+
+            // Update card styling
+            const card = document.getElementById(`review-card-${memoryId}`);
+            if (card) {
+                card.classList.remove('decision-keep', 'decision-partial', 'decision-discard');
+                card.classList.add(`decision-${decision}`);
+
+                // Update button states
+                const buttons = card.querySelectorAll('.review-btn');
+                buttons.forEach(btn => {
+                    btn.classList.remove('active-keep', 'active-partial', 'active-discard');
+                });
+                const activeBtn = card.querySelector(`.review-btn:nth-child(${decision === 'keep' ? 1 : decision === 'partial' ? 2 : 3})`);
+                if (activeBtn) activeBtn.classList.add(`active-${decision}`);
+            }
+
+            updateReviewCounts();
+        }
+
+        function applyBulkDecision(decision) {
+            reviewMemories.forEach(m => {
+                reviewDecisions[m.id] = decision;
+            });
+            renderReviewCards();
+            updateReviewCounts();
+        }
+
+        function applySuggestions() {
+            reviewMemories.forEach(m => {
+                const suggestion = reviewSuggestions[m.id];
+                if (suggestion) {
+                    reviewDecisions[m.id] = suggestion.suggested_decision;
+                }
+            });
+            renderReviewCards();
+            updateReviewCounts();
+            showToast('Applied AI suggestions', 'success');
+        }
+
+        async function submitReviews() {
+            if (!currentReviewSession) {
+                showToast('No session selected', 'warning');
+                return;
+            }
+
+            const reviews = Object.entries(reviewDecisions).map(([memoryId, decision]) => ({
+                memory_id: parseInt(memoryId),
+                decision: decision
+            }));
+
+            if (!reviews.length) {
+                showToast('No reviews to submit', 'warning');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_URL}/api/session/${currentReviewSession}/review`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reviews })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    showToast(`Reviewed ${data.processed} memories: ${data.kept} kept, ${data.partial} partial, ${data.discarded} discarded`, 'success');
+
+                    // Refresh the list
+                    loadRecentSessions();
+                    loadSessionForReview();
+                } else {
+                    throw new Error(data.error || 'Failed to submit reviews');
+                }
+            } catch (e) {
+                console.error('Error submitting reviews:', e);
+                showToast(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        // Load sessions when review tab is opened
+        function onReviewTabOpen() {
+            loadRecentSessions();
+        }
+
+        // ===== Knowledge Graph Visualization =====
+        let graphSimulation = null;
+        let graphData = { nodes: [], edges: [] };
+        let selectedGraphNode = null;
+        let graphInitialized = false;
+
+        const nodeColors = {
+            error: '#f85149',
+            decision: '#58a6ff',
+            code: '#3fb950',
+            pattern: '#a371f7',
+            session: '#39d4d4',
+            chunk: '#d29922',
+            preference: '#db61a2'
+        };
+
+        async function loadGraph() {
+            const loadingEl = document.getElementById('graph-loading');
+            if (loadingEl) loadingEl.style.display = 'block';
+
+            const projectPath = currentProject || '';
+            try {
+                const response = await fetch(`${API_URL}/api/graph/full?project_path=${encodeURIComponent(projectPath)}&limit=200`);
+                const data = await response.json();
+                if (data.success) {
+                    graphData = data;
+                    renderGraph();
+                    updateGraphStats(data.stats);
+                } else {
+                    console.error('Failed to load graph:', data.error);
+                    showGraphEmpty('Failed to load graph data');
+                }
+            } catch (e) {
+                console.error('Failed to load graph:', e);
+                showGraphEmpty('Error connecting to server');
+            } finally {
+                if (loadingEl) loadingEl.style.display = 'none';
+            }
+        }
+
+        function showGraphEmpty(message) {
+            const container = document.getElementById('graph-canvas');
+            d3.select('#graph-canvas').selectAll('*').remove();
+            const svg = d3.select('#graph-canvas');
+            const width = container.clientWidth || 600;
+            const height = container.clientHeight || 400;
+            svg.attr('viewBox', [0, 0, width, height]);
+
+            svg.append('text')
+                .attr('x', width / 2)
+                .attr('y', height / 2)
+                .attr('text-anchor', 'middle')
+                .attr('fill', 'var(--text-secondary)')
+                .text(message || 'No graph data available');
+        }
+
+        function renderGraph() {
+            const container = document.getElementById('graph-canvas');
+            const width = container.clientWidth || 600;
+            const height = container.clientHeight || 400;
+
+            // Clear previous
+            d3.select('#graph-canvas').selectAll('*').remove();
+
+            const svg = d3.select('#graph-canvas')
+                .attr('viewBox', [0, 0, width, height]);
+
+            // Filter nodes and edges based on checkboxes
+            const visibleTypes = getVisibleTypes();
+            const visibleRels = getVisibleRelationships();
+
+            const nodes = (graphData.nodes || []).filter(n => visibleTypes.includes(n.type));
+            const nodeIds = new Set(nodes.map(n => n.id));
+
+            // Normalize edges to use source/target properly
+            const edges = (graphData.edges || []).filter(e => {
+                const srcId = e.source_id || (typeof e.source === 'object' ? e.source.id : e.source);
+                const tgtId = e.target_id || (typeof e.target === 'object' ? e.target.id : e.target);
+                return visibleRels.includes(e.relationship) &&
+                    nodeIds.has(srcId) &&
+                    nodeIds.has(tgtId);
+            }).map(e => ({
+                ...e,
+                source: e.source_id || (typeof e.source === 'object' ? e.source.id : e.source),
+                target: e.target_id || (typeof e.target === 'object' ? e.target.id : e.target)
+            }));
+
+            if (nodes.length === 0) {
+                showGraphEmpty('No nodes match current filters');
+                return;
+            }
+
+            // Add zoom behavior
+            const g = svg.append('g');
+            const zoom = d3.zoom()
+                .extent([[0, 0], [width, height]])
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => g.attr('transform', event.transform));
+            svg.call(zoom);
+
+            // Store zoom for reset
+            svg.node().__zoom = d3.zoomIdentity;
+
+            // Create simulation
+            graphSimulation = d3.forceSimulation(nodes)
+                .force('link', d3.forceLink(edges)
+                    .id(d => d.id)
+                    .distance(100))
+                .force('charge', d3.forceManyBody().strength(-200))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(30));
+
+            // Draw edges
+            const link = g.append('g')
+                .attr('class', 'links')
+                .selectAll('line')
+                .data(edges)
+                .join('line')
+                .attr('class', d => `link ${d.relationship}`)
+                .attr('stroke-width', d => Math.max(1, (d.strength || 0.5) * 3));
+
+            // Draw nodes
+            const node = g.append('g')
+                .attr('class', 'nodes')
+                .selectAll('g')
+                .data(nodes)
+                .join('g')
+                .attr('class', 'node')
+                .call(d3.drag()
+                    .on('start', dragstarted)
+                    .on('drag', dragged)
+                    .on('end', dragended))
+                .on('click', (event, d) => selectGraphNode(d));
+
+            node.append('circle')
+                .attr('r', 8)
+                .attr('fill', d => nodeColors[d.type] || '#888')
+                .attr('stroke', d => nodeColors[d.type] || '#888');
+
+            node.append('text')
+                .attr('dx', 12)
+                .attr('dy', 4)
+                .text(d => {
+                    const content = d.content || '';
+                    return content.length > 20 ? content.substring(0, 20) + '...' : content;
+                });
+
+            // Tick
+            graphSimulation.on('tick', () => {
+                link
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+                node.attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+
+            graphInitialized = true;
+        }
+
+        function dragstarted(event, d) {
+            if (!event.active) graphSimulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+
+        function dragended(event, d) {
+            if (!event.active) graphSimulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        }
+
+        async function selectGraphNode(node) {
+            selectedGraphNode = node;
+            d3.selectAll('.node').classed('selected', false);
+            d3.selectAll('.node').filter(d => d.id === node.id).classed('selected', true);
+
+            // Fetch full node details
+            try {
+                const response = await fetch(`${API_URL}/api/graph/node/${node.id}`);
+                const data = await response.json();
+                if (data.success) {
+                    showNodeDetails(data.node, data.relationships);
+                }
+            } catch (e) {
+                console.error('Failed to get node details:', e);
+            }
+        }
+
+        function showNodeDetails(node, relationships) {
+            const panel = document.getElementById('graph-details');
+            const outgoing = relationships.outgoing || [];
+            const incoming = relationships.incoming || [];
+
+            panel.innerHTML = `
+                <h4>${node.type}: #${node.id}</h4>
+                <div class="meta">
+                    <span><i class="fas fa-calendar"></i> ${new Date(node.created_at).toLocaleString()}</span>
+                    ${node.outcome ? `<span><i class="fas fa-check-circle"></i> ${escapeHtml(node.outcome)}</span>` : ''}
+                    ${node.confidence ? `<span><i class="fas fa-percentage"></i> ${(node.confidence * 100).toFixed(0)}%</span>` : ''}
+                </div>
+                <div class="content">${escapeHtml(node.content || '')}</div>
+                <div class="relationships">
+                    ${incoming.length > 0 ? `
+                        <strong>Incoming:</strong>
+                        ${incoming.map(r => `
+                            <div class="rel-item" onclick="focusGraphNode(${r.id})">
+                                <span class="rel-arrow"><i class="fas fa-arrow-left"></i></span>
+                                <span class="dot dot-${r.type || 'chunk'}"></span>
+                                ${escapeHtml(r.relationship)}: ${escapeHtml((r.content || '').substring(0, 50))}${(r.content || '').length > 50 ? '...' : ''}
+                            </div>
+                        `).join('')}
+                    ` : ''}
+                    ${outgoing.length > 0 ? `
+                        <strong>Outgoing:</strong>
+                        ${outgoing.map(r => `
+                            <div class="rel-item" onclick="focusGraphNode(${r.id})">
+                                <span class="rel-arrow"><i class="fas fa-arrow-right"></i></span>
+                                <span class="dot dot-${r.type || 'chunk'}"></span>
+                                ${escapeHtml(r.relationship)}: ${escapeHtml((r.content || '').substring(0, 50))}${(r.content || '').length > 50 ? '...' : ''}
+                            </div>
+                        `).join('')}
+                    ` : ''}
+                    ${incoming.length === 0 && outgoing.length === 0 ? '<p class="muted">No relationships</p>' : ''}
+                </div>
+            `;
+        }
+
+        function focusGraphNode(nodeId) {
+            const node = graphData.nodes.find(n => n.id === nodeId);
+            if (node) selectGraphNode(node);
+        }
+
+        function highlightGraphNodes(query) {
+            if (!query) {
+                d3.selectAll('.node').classed('highlighted', false);
+                return;
+            }
+            const q = query.toLowerCase();
+            d3.selectAll('.node').classed('highlighted', d =>
+                (d.content || '').toLowerCase().includes(q)
+            );
+        }
+
+        function getVisibleTypes() {
+            const types = [];
+            ['error', 'decision', 'code', 'pattern', 'session', 'chunk', 'preference'].forEach(t => {
+                const el = document.getElementById(`type-${t}`);
+                if (el && el.checked) types.push(t);
+            });
+            return types;
+        }
+
+        function getVisibleRelationships() {
+            const rels = [];
+            ['fixes', 'caused_by', 'supports', 'contradicts', 'related'].forEach(r => {
+                const el = document.getElementById(`rel-${r}`);
+                if (el && el.checked) rels.push(r);
+            });
+            return rels;
+        }
+
+        function updateGraphStats(stats) {
+            const el = document.getElementById('graph-stats');
+            if (!stats) {
+                el.innerHTML = 'No data';
+                return;
+            }
+            el.innerHTML = `
+                <div class="stat-row"><span>Total Nodes:</span><span>${stats.total_nodes || 0}</span></div>
+                <div class="stat-row"><span>Total Edges:</span><span>${stats.total_edges || 0}</span></div>
+                ${Object.entries(stats.by_relationship || {}).map(([k, v]) =>
+                    `<div class="stat-row"><span>${escapeHtml(k)}:</span><span>${v}</span></div>`
+                ).join('')}
+            `;
+        }
+
+        function refreshGraph() {
+            loadGraph();
+        }
+
+        function resetGraphZoom() {
+            const svg = d3.select('#graph-canvas');
+            svg.transition()
+                .duration(500)
+                .call(d3.zoom().transform, d3.zoomIdentity);
+        }
+
+        // Add event listeners to graph filters
+        function initGraphFilters() {
+            ['error', 'decision', 'code', 'pattern', 'session', 'chunk', 'preference'].forEach(t => {
+                const el = document.getElementById(`type-${t}`);
+                if (el) el.addEventListener('change', renderGraph);
+            });
+            ['fixes', 'caused_by', 'supports', 'contradicts', 'related'].forEach(r => {
+                const el = document.getElementById(`rel-${r}`);
+                if (el) el.addEventListener('change', renderGraph);
+            });
+        }
+
+        // Initialize graph filters on DOM ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initGraphFilters);
+        } else {
+            initGraphFilters();
+        }
+
+        // ===== Curator Agent Functions =====
+        let curatorOverlayActive = false;
+        let curatorDuplicates = [];
+        let curatorOrphans = [];
+        let curatorSuggestions = [];
+
+        async function loadCuratorStatus() {
+            try {
+                const response = await fetch(`${API_URL}/api/curator/status`);
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('curatorMemories').textContent = data.total_memories || 0;
+                    document.getElementById('curatorRelationships').textContent = data.total_relationships || 0;
+                    document.getElementById('curatorOrphans').textContent = data.orphan_count || 0;
+                    document.getElementById('curatorConnectivity').textContent =
+                        ((data.connection_ratio || 0) * 100).toFixed(0) + '%';
+
+                    // Highlight warning if orphans are high
+                    const orphanStat = document.getElementById('curatorOrphansStat');
+                    if (data.orphan_count > 10) {
+                        orphanStat.classList.add('warning');
+                    } else {
+                        orphanStat.classList.remove('warning');
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load curator status:', e);
+            }
+        }
+
+        async function runCuratorTask(task) {
+            const findingsEl = document.getElementById('curatorFindings');
+            findingsEl.style.display = 'block';
+            findingsEl.innerHTML = '<p class="muted"><i class="fas fa-spinner fa-spin"></i> Running...</p>';
+
+            const projectPath = currentProject || '';
+            try {
+                let response, data;
+                switch (task) {
+                    case 'duplicates':
+                        response = await fetch(`${API_URL}/api/curator/duplicates?project_path=${encodeURIComponent(projectPath)}&similarity_threshold=0.92&limit=20`);
+                        data = await response.json();
+                        if (data.success) {
+                            curatorDuplicates = data.duplicate_pairs || [];
+                            displayDuplicateFindings(curatorDuplicates);
+                            if (curatorOverlayActive) highlightDuplicatesOnGraph();
+                        }
+                        break;
+
+                    case 'orphans':
+                        response = await fetch(`${API_URL}/api/curator/orphans?project_path=${encodeURIComponent(projectPath)}&limit=30`);
+                        data = await response.json();
+                        if (data.success) {
+                            curatorOrphans = data.orphans || [];
+                            displayOrphanFindings(curatorOrphans);
+                            if (curatorOverlayActive) highlightOrphansOnGraph();
+                        }
+                        break;
+
+                    case 'suggest-links':
+                        response = await fetch(`${API_URL}/api/curator/suggest-links?project_path=${encodeURIComponent(projectPath)}&similarity_threshold=0.7&limit=20`, {
+                            method: 'POST'
+                        });
+                        data = await response.json();
+                        if (data.success) {
+                            curatorSuggestions = data.suggestions || [];
+                            displayLinkSuggestions(curatorSuggestions);
+                            if (curatorOverlayActive) showSuggestedLinksOnGraph();
+                        }
+                        break;
+
+                    case 'quality':
+                        response = await fetch(`${API_URL}/api/curator/quality?project_path=${encodeURIComponent(projectPath)}&limit=50`);
+                        data = await response.json();
+                        if (data.success) {
+                            displayQualityFindings(data);
+                        }
+                        break;
+                }
+            } catch (e) {
+                console.error('Curator task failed:', e);
+                findingsEl.innerHTML = '<p class="muted" style="color: var(--accent-red);">Failed to run task</p>';
+            }
+        }
+
+        async function runCuratorMaintenance() {
+            const findingsEl = document.getElementById('curatorFindings');
+            findingsEl.style.display = 'block';
+            findingsEl.innerHTML = '<p class="muted"><i class="fas fa-spinner fa-spin"></i> Running full maintenance...</p>';
+
+            const projectPath = currentProject || '';
+            try {
+                const response = await fetch(`${API_URL}/api/curator/run?project_path=${encodeURIComponent(projectPath)}`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+                if (data.success && data.report) {
+                    displayMaintenanceReport(data.report);
+                    loadCuratorStatus();
+                    showToast('Curator maintenance completed', 'success');
+                }
+            } catch (e) {
+                console.error('Curator maintenance failed:', e);
+                findingsEl.innerHTML = '<p class="muted" style="color: var(--accent-red);">Maintenance failed</p>';
+            }
+        }
+
+        function displayDuplicateFindings(duplicates) {
+            const findingsEl = document.getElementById('curatorFindings');
+            if (duplicates.length === 0) {
+                findingsEl.innerHTML = '<p class="muted">No duplicates found above threshold</p>';
+                return;
+            }
+            findingsEl.innerHTML = duplicates.slice(0, 10).map(d => `
+                <div class="curator-finding duplicate">
+                    <i class="fas fa-clone"></i>
+                    <span>#${d.memory1.id} ↔ #${d.memory2.id} (${(d.similarity * 100).toFixed(1)}%)</span>
+                    <button class="curator-btn" style="margin-left: auto; padding: 2px 8px;" onclick="mergeDuplicates(${d.merge_recommendation.keep}, ${d.merge_recommendation.remove})">
+                        Merge
+                    </button>
+                </div>
+            `).join('') + `<p class="muted" style="margin-top: 8px;">Found ${duplicates.length} duplicate pairs</p>`;
+        }
+
+        function displayOrphanFindings(orphans) {
+            const findingsEl = document.getElementById('curatorFindings');
+            if (orphans.length === 0) {
+                findingsEl.innerHTML = '<p class="muted">No orphan memories found</p>';
+                return;
+            }
+            findingsEl.innerHTML = orphans.slice(0, 10).map(o => `
+                <div class="curator-finding orphan" onclick="focusGraphNode(${o.id})" style="cursor: pointer;">
+                    <i class="fas fa-unlink"></i>
+                    <span>#${o.id} (${o.type}): ${escapeHtml((o.content || '').substring(0, 40))}...</span>
+                </div>
+            `).join('') + `<p class="muted" style="margin-top: 8px;">Found ${orphans.length} orphan memories</p>`;
+        }
+
+        function displayLinkSuggestions(suggestions) {
+            const findingsEl = document.getElementById('curatorFindings');
+            if (suggestions.length === 0) {
+                findingsEl.innerHTML = '<p class="muted">No link suggestions found</p>';
+                return;
+            }
+            findingsEl.innerHTML = suggestions.slice(0, 10).map(s => `
+                <div class="curator-finding suggestion">
+                    <i class="fas fa-link"></i>
+                    <span>#${s.source_id} → ${s.relationship} → #${s.target_id} (${(s.confidence * 100).toFixed(0)}%)</span>
+                    <button class="curator-btn" style="margin-left: auto; padding: 2px 8px;" onclick="applyLink(${s.source_id}, ${s.target_id}, '${s.relationship}')">
+                        Apply
+                    </button>
+                </div>
+            `).join('') + `<p class="muted" style="margin-top: 8px;">Found ${suggestions.length} suggestions</p>`;
+        }
+
+        function displayQualityFindings(data) {
+            const findingsEl = document.getElementById('curatorFindings');
+            const summary = data.summary || {};
+            const needsAttention = data.needs_attention || [];
+
+            let html = `
+                <div style="display: flex; gap: 16px; margin-bottom: 12px;">
+                    <div><strong>Avg Quality:</strong> ${((summary.average_quality || 0) * 100).toFixed(0)}%</div>
+                    <div><strong>High Quality:</strong> ${summary.high_quality_count || 0}</div>
+                    <div style="color: var(--accent-yellow);"><strong>Needs Attention:</strong> ${summary.needs_attention_count || 0}</div>
+                </div>
+            `;
+
+            if (needsAttention.length > 0) {
+                html += '<strong>Low quality memories:</strong>';
+                html += needsAttention.slice(0, 5).map(m => `
+                    <div class="curator-finding" style="cursor: pointer;" onclick="focusGraphNode(${m.id})">
+                        <i class="fas fa-star" style="color: var(--accent-yellow);"></i>
+                        <span>#${m.id} (${(m.quality_score * 100).toFixed(0)}%): ${escapeHtml((m.content_preview || '').substring(0, 40))}...</span>
+                    </div>
+                `).join('');
+            }
+
+            findingsEl.innerHTML = html;
+        }
+
+        function displayMaintenanceReport(report) {
+            const findingsEl = document.getElementById('curatorFindings');
+            const findings = report.findings || {};
+            const actions = report.actions_taken || {};
+            const recommendations = report.recommendations || [];
+
+            let html = '<strong>Maintenance Report:</strong><br>';
+            html += `<div style="margin: 8px 0;">Tasks: ${(report.tasks_run || []).join(', ')}</div>`;
+
+            if (Object.keys(findings).length > 0) {
+                html += '<div style="margin: 8px 0;"><strong>Findings:</strong>';
+                for (const [k, v] of Object.entries(findings)) {
+                    html += `<br>• ${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`;
+                }
+                html += '</div>';
+            }
+
+            if (Object.keys(actions).length > 0) {
+                html += '<div style="margin: 8px 0; color: var(--accent-green);"><strong>Actions Taken:</strong>';
+                for (const [k, v] of Object.entries(actions)) {
+                    html += `<br>• ${k}: ${v}`;
+                }
+                html += '</div>';
+            }
+
+            if (recommendations.length > 0) {
+                html += '<div style="margin: 8px 0; color: var(--accent-yellow);"><strong>Recommendations:</strong>';
+                for (const rec of recommendations) {
+                    html += `<br>• ${rec}`;
+                }
+                html += '</div>';
+            }
+
+            findingsEl.innerHTML = html;
+        }
+
+        function toggleCuratorOverlay() {
+            curatorOverlayActive = !curatorOverlayActive;
+            const btn = document.getElementById('toggleOverlayBtn');
+            btn.classList.toggle('active', curatorOverlayActive);
+
+            if (curatorOverlayActive) {
+                highlightDuplicatesOnGraph();
+                highlightOrphansOnGraph();
+                showSuggestedLinksOnGraph();
+            } else {
+                clearCuratorOverlay();
+            }
+        }
+
+        function highlightDuplicatesOnGraph() {
+            if (!curatorOverlayActive || curatorDuplicates.length === 0) return;
+
+            const dupIds = new Set();
+            curatorDuplicates.forEach(d => {
+                dupIds.add(d.memory1.id);
+                dupIds.add(d.memory2.id);
+            });
+
+            d3.selectAll('.node').classed('duplicate', d => dupIds.has(d.id));
+        }
+
+        function highlightOrphansOnGraph() {
+            if (!curatorOverlayActive || curatorOrphans.length === 0) return;
+
+            const orphanIds = new Set(curatorOrphans.map(o => o.id));
+            d3.selectAll('.node').classed('orphan', d => orphanIds.has(d.id));
+        }
+
+        function showSuggestedLinksOnGraph() {
+            if (!curatorOverlayActive || curatorSuggestions.length === 0) return;
+
+            // Add suggested links as dashed lines
+            const g = d3.select('#graph-canvas g');
+            if (!g.node()) return;
+
+            // Remove existing suggested links
+            g.selectAll('.link.suggested').remove();
+
+            // Add new ones
+            curatorSuggestions.forEach(s => {
+                const sourceNode = graphData.nodes?.find(n => n.id === s.source_id);
+                const targetNode = graphData.nodes?.find(n => n.id === s.target_id);
+                if (sourceNode && targetNode && sourceNode.x && targetNode.x) {
+                    g.append('line')
+                        .attr('class', 'link suggested')
+                        .attr('x1', sourceNode.x)
+                        .attr('y1', sourceNode.y)
+                        .attr('x2', targetNode.x)
+                        .attr('y2', targetNode.y)
+                        .attr('stroke-width', 2);
+                }
+            });
+        }
+
+        function clearCuratorOverlay() {
+            d3.selectAll('.node').classed('duplicate', false).classed('orphan', false);
+            d3.selectAll('.link.suggested').remove();
+        }
+
+        async function mergeDuplicates(keepId, removeId) {
+            if (!confirm(`Merge memory #${removeId} into #${keepId}?`)) return;
+
+            try {
+                const response = await fetch(`${API_URL}/api/curator/merge`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keep_id: keepId, remove_ids: [removeId], merge_content: false })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(`Merged #${removeId} into #${keepId}`, 'success');
+                    loadGraph();
+                    loadCuratorStatus();
+                } else {
+                    showToast('Merge failed: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (e) {
+                console.error('Merge failed:', e);
+                showToast('Merge failed', 'error');
+            }
+        }
+
+        async function applyLink(sourceId, targetId, relationship) {
+            try {
+                const response = await fetch(`${API_URL}/api/graph/relationship`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ source_id: sourceId, target_id: targetId, relationship: relationship })
+                });
+                const data = await response.json();
+                if (data.success) {
+                    showToast(`Created ${relationship} link`, 'success');
+                    loadGraph();
+                    loadCuratorStatus();
+                } else {
+                    showToast('Failed to create link: ' + (data.error || 'Unknown error'), 'error');
+                }
+            } catch (e) {
+                console.error('Apply link failed:', e);
+                showToast('Failed to create link', 'error');
+            }
+        }
+
+        // ===== End Curator Agent Functions =====
+
+        // ===== End Knowledge Graph =====
+
+        // Hook into tab switching
+        const originalSwitchTab = window.switchTab;
+        window.switchTab = function(tab) {
+            originalSwitchTab(tab);
+            if (tab === 'review') {
+                onReviewTabOpen();
+            }
+            if (tab === 'graph') {
+                // Delay load slightly to ensure container is visible for size calculation
+                setTimeout(() => {
+                    loadGraph();
+                    loadCuratorStatus();
+                }, 100);
+            }
+        };
+
+        // Check URL hash for deep linking to review
+        if (window.location.hash.startsWith('#review/')) {
+            const sessionId = window.location.hash.replace('#review/', '');
+            setTimeout(() => {
+                switchTab('review');
+                setTimeout(() => {
+                    document.getElementById('reviewSessionSelect').value = sessionId;
+                    loadSessionForReview();
+                }, 500);
+            }, 1000);
+        }
     </script>
 
     <!-- Memory Detail Modal -->

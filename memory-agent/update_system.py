@@ -30,10 +30,12 @@ VERSION_HISTORY = {
     "1.4.0": "Added insights and memory_archive",
     "1.5.0": "Added anchor_conflicts and anchor_history",
     "2.0.0": "Path normalization fix, cleanup system",
-    "2.1.0": "Current version - full feature set",
+    "2.1.0": "Full feature set with confidence scoring",
+    "2.2.0": "Outcome spectrum (pending/success/partial/failed/superseded)",
+    "2.3.0": "Current version - context tagging (worked_in/failed_in/context_confidence)",
 }
 
-CURRENT_VERSION = "2.1.0"
+CURRENT_VERSION = "2.3.0"
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -492,6 +494,13 @@ class MigrationManager:
             'last_accessed': 'TEXT',
             'skill_used': 'TEXT',
             'chat_id': 'TEXT',
+            'confidence': 'REAL DEFAULT 0.5',
+            # Outcome spectrum columns (v2.2.0)
+            'outcome_status': "TEXT DEFAULT 'pending'",
+            'fixed': 'TEXT',  # JSON array
+            'did_not_fix': 'TEXT',  # JSON array
+            'caused': 'TEXT',  # JSON array
+            'superseded_by': 'INTEGER',  # FK to memories.id
         }
 
         for col, col_type in memories_columns.items():
@@ -503,6 +512,7 @@ class MigrationManager:
         # Session state columns
         session_columns = {
             'last_activity_at': 'TEXT',
+            'last_flush_at': 'TEXT',
         }
 
         for col, col_type in session_columns.items():
@@ -596,6 +606,8 @@ class MigrationManager:
             ('idx_memories_type', 'memories', 'type'),
             ('idx_memories_created', 'memories', 'created_at'),
             ('idx_memories_importance', 'memories', 'importance'),
+            ('idx_memories_outcome_status', 'memories', 'outcome_status'),
+            ('idx_memories_superseded_by', 'memories', 'superseded_by'),
             ('idx_timeline_session', 'timeline_events', 'session_id'),
             ('idx_timeline_project', 'timeline_events', 'project_path'),
             ('idx_timeline_type', 'timeline_events', 'event_type'),

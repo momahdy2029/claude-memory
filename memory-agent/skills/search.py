@@ -1,7 +1,95 @@
 """Semantic search skill with context filtering and fallback support."""
+import logging
 from typing import Dict, Any, Optional, List
 from services.database import DatabaseService
 from services.embeddings import EmbeddingService
+
+logger = logging.getLogger(__name__)
+
+
+async def _enrich_with_graph_context(db: DatabaseService, results: list) -> list:
+    """
+    Enrich search results with relationship context.
+    This helps Claude understand the causal chains and related knowledge.
+
+    Args:
+        db: Database service instance
+        results: List of search results to enrich
+
+    Returns:
+        List of enriched results with graph context added
+    """
+    enriched = []
+    for result in results:
+        memory_id = result.get('id')
+        if not memory_id:
+            enriched.append(result)
+            continue
+
+        # Create enriched copy
+        enriched_result = dict(result)
+
+        memory_type = result.get('type', '')
+
+        # For errors: find what fixes them
+        if memory_type == 'error':
+            try:
+                fixes = await db.get_related_memories(memory_id, 'fixes', direction='incoming', depth=1)
+                if fixes:
+                    enriched_result['known_fixes'] = [
+                        {'id': f['id'], 'content': f['content'][:200], 'outcome': f.get('outcome')}
+                        for f in fixes
+                    ]
+            except Exception as e:
+                logger.debug(f"Failed to get fixes for memory {memory_id}: {e}")
+
+        # For decisions: find rationale and consequences
+        if memory_type == 'decision':
+            try:
+                # What supports this decision
+                supports = await db.get_related_memories(memory_id, 'supports', direction='incoming', depth=1)
+                if supports:
+                    enriched_result['rationale'] = [
+                        {'id': s['id'], 'content': s['content'][:200]}
+                        for s in supports
+                    ]
+            except Exception as e:
+                logger.debug(f"Failed to get supports for memory {memory_id}: {e}")
+
+            try:
+                # What this decision caused
+                caused = await db.get_related_memories(memory_id, 'caused_by', direction='outgoing', depth=1)
+                if caused:
+                    enriched_result['consequences'] = [
+                        {'id': c['id'], 'content': c['content'][:200]}
+                        for c in caused
+                    ]
+            except Exception as e:
+                logger.debug(f"Failed to get consequences for memory {memory_id}: {e}")
+
+        # For all types: find contradictions (critical for anti-hallucination)
+        try:
+            contradictions = await db.find_contradictions(memory_id)
+            if contradictions:
+                enriched_result['contradictions'] = [
+                    {'id': c['id'], 'content': c['content'][:200]}
+                    for c in contradictions
+                ]
+        except Exception as e:
+            logger.debug(f"Failed to get contradictions for memory {memory_id}: {e}")
+
+        # For errors and decisions: include causal chain
+        if memory_type in ['error', 'decision', 'code']:
+            try:
+                chain = await db.get_causal_chain(memory_id, max_depth=3)
+                if chain and (chain.get('causes') or chain.get('fixes') or chain.get('root_causes')):
+                    enriched_result['causal_chain'] = chain
+            except Exception as e:
+                logger.debug(f"Failed to get causal chain for memory {memory_id}: {e}")
+
+        enriched.append(enriched_result)
+
+    return enriched
 
 
 async def semantic_search(
@@ -14,12 +102,35 @@ async def semantic_search(
     project_path: Optional[str] = None,
     agent_type: Optional[str] = None,
     success_only: bool = False,
-    threshold: float = 0.5
+    threshold: float = 0.5,
+    # Outcome spectrum filters
+    include_failed: bool = False,
+    include_superseded: bool = False,
+    include_unreliable: bool = False,
+    outcome_status: Optional[str] = None,
+    # Context-aware search
+    current_context: Optional[Dict[str, Any]] = None,
+    auto_detect_context: bool = True,
+    # Graph enrichment
+    include_graph: bool = True
 ) -> Dict[str, Any]:
     """
     Search memories using semantic similarity with context filters.
 
     Includes automatic fallback to keyword search when Ollama is unavailable.
+
+    Outcome-aware search behavior:
+    - 'success' memories rank highest (1.5x boost)
+    - 'partial' memories shown with warning (1.0x - no penalty)
+    - 'failed' memories excluded by default (use include_failed=True to show)
+    - 'superseded' memories excluded and replaced with their superseding memory
+    - 'pending' memories shown normally (1.0x)
+    - Unreliable memories (failure_count >= 3) excluded by default (use include_unreliable=True)
+
+    Context-aware search:
+    - If current_context provided, memories that worked in similar contexts get +0.2 boost
+    - Memories that failed in similar contexts get -0.2 penalty
+    - If auto_detect_context=True and project_path provided, context is auto-detected
 
     Args:
         db: Database service instance
@@ -30,12 +141,33 @@ async def semantic_search(
         session_id: Filter by session ID
         project_path: Filter by project
         agent_type: Filter by agent that created the memory
-        success_only: Only return memories marked as successful
+        success_only: Only return memories marked as successful (legacy)
         threshold: Minimum similarity threshold (0-1)
+        include_failed: Include memories with outcome_status='failed' (default False)
+        include_superseded: Include memories with outcome_status='superseded' (default False)
+        include_unreliable: Include memories with failure_count >= 3 (default False)
+        outcome_status: Filter by specific outcome status
+        current_context: Context dict with project_type, tech_stack, file_patterns
+        auto_detect_context: If True and project_path provided, auto-detect context
+        include_graph: Enrich results with graph context (fixes, rationale, contradictions)
 
     Returns:
-        Dict with search results ranked by similarity * importance
+        Dict with search results ranked by: (similarity * 0.7) + (confidence * 0.3) + context_adjustment
+        Each result includes outcome_status, outcome_warning, outcome_boost, context_adjustment,
+        and context_recommendation fields.
     """
+    # Auto-detect context from project_path if enabled
+    detected_context = None
+    if auto_detect_context and project_path and not current_context:
+        try:
+            from skills.context import detect_project_context
+            detected_context = detect_project_context(project_path)
+        except Exception:
+            pass
+
+    # Use provided context or detected context
+    search_context = current_context or detected_context
+
     # Generate embedding for the query (may return None if Ollama unavailable)
     query_embedding = await embeddings.generate_embedding(query)
 
@@ -53,7 +185,12 @@ async def semantic_search(
             project_path=project_path,
             agent_type=agent_type,
             success_only=success_only,
-            threshold=threshold
+            threshold=threshold,
+            include_failed=include_failed,
+            include_superseded=include_superseded,
+            include_unreliable=include_unreliable,
+            outcome_status=outcome_status,
+            current_context=search_context
         )
     else:
         # Fallback to keyword search
@@ -65,8 +202,20 @@ async def semantic_search(
             session_id=session_id,
             project_path=project_path,
             agent_type=agent_type,
-            success_only=success_only
+            success_only=success_only,
+            include_failed=include_failed,
+            include_superseded=include_superseded,
+            include_unreliable=include_unreliable,
+            outcome_status=outcome_status
         )
+
+    # Enrich with graph context if requested
+    if include_graph:
+        try:
+            results = await _enrich_with_graph_context(db, results)
+        except Exception as e:
+            logger.warning(f"Failed to enrich with graph context: {e}")
+            # Continue with unenriched results
 
     return {
         "success": True,
@@ -79,8 +228,15 @@ async def semantic_search(
             "type": memory_type,
             "project": project_path,
             "agent": agent_type,
-            "success_only": success_only
+            "success_only": success_only,
+            "include_failed": include_failed,
+            "include_superseded": include_superseded,
+            "include_unreliable": include_unreliable,
+            "outcome_status": outcome_status,
+            "include_graph": include_graph
         },
+        "context_aware": search_context is not None,
+        "detected_context": detected_context,
         "threshold": threshold if search_method == "semantic" else None
     }
 

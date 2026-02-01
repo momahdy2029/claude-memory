@@ -175,36 +175,90 @@ async function main() {
     // Create .env file
     createEnvFile();
 
-    // Check Ollama (non-blocking)
+    // Check Ollama
     log('Checking Ollama...');
     const ollamaRunning = await checkOllama();
+
     if (ollamaRunning) {
         success('Ollama is running');
-    } else {
-        warn('Ollama not detected - embeddings require Ollama');
-        console.log('  Install from: https://ollama.ai/');
-        console.log('  Then run: ollama pull nomic-embed-text');
+        // Check if model is installed
+        const modelInstalled = await checkOllamaModel();
+        if (modelInstalled) {
+            success('Embedding model is ready');
+        } else {
+            warn('Embedding model not found');
+        }
     }
 
-    // Print next steps
+    // Print next steps based on what's missing
     header('Installation Complete!');
-    console.log('Next steps:');
-    console.log('');
-    console.log('  1. Run the setup wizard:');
-    console.log('     claude-memory-agent install');
-    console.log('');
-    console.log('  2. Start the agent:');
-    console.log('     claude-memory-agent start');
-    console.log('');
-    console.log('  3. Open the dashboard:');
-    console.log('     claude-memory-agent dashboard');
-    console.log('');
 
     if (!ollamaRunning) {
-        console.log('  For embeddings, install and start Ollama:');
-        console.log('     ollama pull nomic-embed-text');
-        console.log('     ollama serve');
+        // Ollama not installed - show big warning
+        console.log(`${colors.red}${colors.bold}╔════════════════════════════════════════════════════════════╗${colors.reset}`);
+        console.log(`${colors.red}${colors.bold}║  REQUIRED: Install Ollama for semantic search to work      ║${colors.reset}`);
+        console.log(`${colors.red}${colors.bold}╚════════════════════════════════════════════════════════════╝${colors.reset}`);
         console.log('');
+        console.log('  Ollama is required for the memory agent to work properly.');
+        console.log('  Without it, semantic search will be disabled.');
+        console.log('');
+        console.log(`  ${colors.cyan}Step 1:${colors.reset} Download and install Ollama:`);
+        console.log(`          ${colors.bold}https://ollama.ai/download${colors.reset}`);
+        console.log('');
+        console.log(`  ${colors.cyan}Step 2:${colors.reset} After installing, open a terminal and run:`);
+        console.log(`          ${colors.bold}ollama pull nomic-embed-text${colors.reset}`);
+        console.log('');
+        console.log(`  ${colors.cyan}Step 3:${colors.reset} Start Ollama (it runs in background):`);
+        console.log(`          ${colors.bold}ollama serve${colors.reset}`);
+        console.log('');
+        console.log(`  ${colors.cyan}Step 4:${colors.reset} Then run the setup:`);
+        console.log(`          ${colors.bold}claude-memory-agent install${colors.reset}`);
+        console.log('');
+    } else {
+        // Ollama running - show normal next steps
+        console.log('Next steps:');
+        console.log('');
+        console.log('  1. Run the setup wizard:');
+        console.log(`     ${colors.bold}claude-memory-agent install${colors.reset}`);
+        console.log('');
+        console.log('  2. Start the agent:');
+        console.log(`     ${colors.bold}claude-memory-agent start${colors.reset}`);
+        console.log('');
+        console.log('  3. Open the dashboard:');
+        console.log(`     ${colors.bold}claude-memory-agent dashboard${colors.reset}`);
+        console.log('');
+    }
+}
+
+// Check if embedding model is installed in Ollama
+async function checkOllamaModel() {
+    try {
+        const http = require('http');
+        return new Promise((resolve) => {
+            const req = http.get('http://localhost:11434/api/tags', { timeout: 2000 }, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                    try {
+                        const json = JSON.parse(data);
+                        const models = json.models || [];
+                        const hasModel = models.some(m =>
+                            m.name && m.name.includes('nomic-embed-text')
+                        );
+                        resolve(hasModel);
+                    } catch (e) {
+                        resolve(false);
+                    }
+                });
+            });
+            req.on('error', () => resolve(false));
+            req.on('timeout', () => {
+                req.destroy();
+                resolve(false);
+            });
+        });
+    } catch (e) {
+        return false;
     }
 }
 

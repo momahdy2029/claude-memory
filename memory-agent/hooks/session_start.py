@@ -6,6 +6,8 @@ This hook runs when a Claude Code session starts and:
 - Retrieves recent decisions and patterns
 - Gets unresolved items from previous sessions
 - Injects relevant context into the session
+- Loads daily logs (Moltbot-inspired)
+- Loads MEMORY.md core facts (Moltbot-inspired)
 
 Configure in Claude Code settings:
 {
@@ -67,6 +69,46 @@ async def load_session_context(project_path: str) -> str:
     """Load all relevant context for a session start."""
     context_parts = []
 
+    # ============================================================
+    # MOLTBOT-INSPIRED: Load MEMORY.md first (core facts)
+    # ============================================================
+    memory_md = await call_memory_skill("read_memory_md", {
+        "project_path": project_path
+    })
+
+    if memory_md and memory_md.get("exists"):
+        context_parts.append("## Core Facts (from MEMORY.md)")
+        # Include the summary or first part of content
+        content = memory_md.get("content", "")
+        # Truncate if too long
+        if len(content) > 2000:
+            content = content[:2000] + "\n...(truncated)"
+        context_parts.append(content)
+
+    # ============================================================
+    # MOLTBOT-INSPIRED: Load recent daily logs
+    # ============================================================
+    daily_logs = await call_memory_skill("daily_log_read", {
+        "project_path": project_path,
+        "days": 2,
+        "max_chars": 3000
+    })
+
+    if daily_logs and daily_logs.get("logs"):
+        context_parts.append("\n## Recent Activity (from Daily Logs)")
+        for log in daily_logs["logs"]:
+            log_date = log.get("date", "Unknown")
+            log_content = log.get("content", "")
+            # Show just the highlights, not full content
+            if len(log_content) > 1500:
+                log_content = log_content[:1500] + "\n...(truncated)"
+            context_parts.append(f"\n### {log_date}")
+            context_parts.append(log_content)
+
+    # ============================================================
+    # ORIGINAL MEMORY SYSTEM CONTEXT
+    # ============================================================
+
     # 1. Get project info
     project_info = await call_memory_skill("get_project_context", {
         "project_path": project_path,
@@ -75,7 +117,7 @@ async def load_session_context(project_path: str) -> str:
 
     if project_info and project_info.get("project"):
         proj = project_info["project"]
-        context_parts.append(f"## Project: {proj.get('name', project_path)}")
+        context_parts.append(f"\n## Project: {proj.get('name', project_path)}")
         if proj.get("tech_stack"):
             context_parts.append(f"Tech Stack: {', '.join(proj['tech_stack'])}")
         if proj.get("conventions"):

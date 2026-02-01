@@ -13,16 +13,22 @@ A persistent semantic memory system for Claude Code sessions. Stores memories, t
 
 ## Quick Start
 
-### 1. Prerequisites
+### 1. Prerequisites (Install These First!)
 
-- Node.js 16+ (for npm installation)
-- Python 3.9+
-- [Ollama](https://ollama.ai/) with `nomic-embed-text` model
+| Requirement | Download | Why Needed |
+|-------------|----------|------------|
+| **Python 3.9+** | https://python.org | Runs the agent |
+| **Ollama** | https://ollama.ai/download | Provides embeddings |
+| **Node.js 16+** | https://nodejs.org | For npm install |
+
+**After installing Ollama, run these commands:**
 
 ```bash
-# Install Ollama, then pull the embedding model
+# Download the embedding model (required!)
 ollama pull nomic-embed-text
-ollama serve  # Start Ollama server
+
+# Start Ollama (runs in background)
+ollama serve
 ```
 
 ### 2. Installation

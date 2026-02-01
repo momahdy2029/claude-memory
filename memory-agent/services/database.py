@@ -609,6 +609,32 @@ class DatabaseService:
         # Migration: Add embedding_model column if it doesn't exist
         safe_add_column("memories", "embedding_model", "TEXT DEFAULT 'nomic-embed-text'")
 
+        # Migration: Add confidence column if it doesn't exist
+        # Confidence is a stored score (0.0 to 1.0) representing memory reliability
+        # New memories start at 0.5, can be updated via API
+        safe_add_column("memories", "confidence", "REAL DEFAULT 0.5")
+
+        # Migration: Add outcome spectrum columns (v2.2.0)
+        # These track the effectiveness of solutions stored as memories
+        safe_add_column("memories", "outcome_status", "TEXT DEFAULT 'pending'")
+        safe_add_column("memories", "fixed", "TEXT")  # JSON array of what was fixed
+        safe_add_column("memories", "did_not_fix", "TEXT")  # JSON array of remaining issues
+        safe_add_column("memories", "caused", "TEXT")  # JSON array of side effects
+        safe_add_column("memories", "superseded_by", "INTEGER")  # FK to memories.id
+
+        # Migration: Add self-correcting confidence columns (v2.2.1)
+        # Track solution outcomes for automatic confidence adjustment
+        safe_add_column("memories", "failure_count", "INTEGER DEFAULT 0")  # Consecutive failures
+        safe_add_column("memories", "times_worked", "INTEGER DEFAULT 0")  # Total times solution worked
+        safe_add_column("memories", "times_failed", "INTEGER DEFAULT 0")  # Total times solution failed
+
+        # Migration: Add context tagging columns (v2.3.0)
+        # Context-aware memory system - tracks where solutions worked/failed
+        # This enables context-specific ranking: same solution may work in React but fail in Vue
+        safe_add_column("memories", "worked_in", "TEXT")  # JSON array of contexts where solution worked
+        safe_add_column("memories", "failed_in", "TEXT")  # JSON array of contexts where solution failed
+        safe_add_column("memories", "context_confidence", "REAL")  # Context-specific confidence score
+
         # ============================================================
         # SESSION TIMELINE TABLES (Anti-Hallucination Layer)
         # ============================================================
@@ -1005,6 +1031,97 @@ class DatabaseService:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_conflicts_session ON anchor_conflicts(session_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_anchor_history ON anchor_history(anchor_id)")
 
+        # ============================================================
+        # MARKDOWN SYNC TABLES (Moltbot-inspired transparency)
+        # ============================================================
+
+        # Markdown sync tracking - tracks which memories are synced to markdown files
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS markdown_syncs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                file_type TEXT NOT NULL,  -- 'memory_md', 'daily_log', 'flush'
+                file_path TEXT NOT NULL,
+                memory_id INTEGER,
+                project_path TEXT,
+                synced_at TEXT DEFAULT (datetime('now')),
+                content_hash TEXT,
+
+                FOREIGN KEY (memory_id) REFERENCES memories(id)
+            )
+        """)
+
+        # Indexes for markdown_syncs
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markdown_syncs_type ON markdown_syncs(file_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markdown_syncs_project ON markdown_syncs(project_path)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markdown_syncs_memory ON markdown_syncs(memory_id)")
+
+        # ============================================================
+        # KNOWLEDGE GRAPH RELATIONSHIPS TABLE
+        # ============================================================
+
+        # Memory relationships for knowledge graph traversal
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_relationships (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_id INTEGER NOT NULL,
+                target_id INTEGER NOT NULL,
+                relationship TEXT NOT NULL,
+                strength REAL DEFAULT 1.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (source_id) REFERENCES memories(id) ON DELETE CASCADE,
+                FOREIGN KEY (target_id) REFERENCES memories(id) ON DELETE CASCADE,
+                UNIQUE(source_id, target_id, relationship)
+            )
+        """)
+
+        # Indexes for memory_relationships
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rel_source ON memory_relationships(source_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rel_target ON memory_relationships(target_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_rel_type ON memory_relationships(relationship)")
+
+        # ============================================================
+        # CURATOR AGENT TABLES
+        # ============================================================
+
+        # Curator configuration per project
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS curator_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT UNIQUE,
+                auto_dedup_enabled INTEGER DEFAULT 1,
+                auto_link_enabled INTEGER DEFAULT 1,
+                dedup_threshold REAL DEFAULT 0.92,
+                maintenance_interval_hours INTEGER DEFAULT 24,
+                last_maintenance_at TEXT,
+                curator_active INTEGER DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+
+        # Curator activity reports
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS curator_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_path TEXT,
+                report_type TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now')),
+                summary TEXT,
+                findings TEXT,
+                actions_taken TEXT,
+                recommendations TEXT
+            )
+        """)
+
+        # Curator indexes
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_curator_config_project ON curator_config(project_path)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_curator_reports_project ON curator_reports(project_path)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_curator_reports_type ON curator_reports(report_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_curator_reports_created ON curator_reports(created_at DESC)")
+
+        # Migration: Add last_flush_at column to session_state if it doesn't exist
+        safe_add_column("session_state", "last_flush_at", "TEXT")
+
         self.conn.commit()
 
     def _serialize_embedding(self, embedding: List[float]) -> str:
@@ -1225,14 +1342,64 @@ class DatabaseService:
         outcome: Optional[str] = None,
         success: Optional[bool] = None,
         tags: Optional[List[str]] = None,
-        importance: int = 5
+        importance: int = 5,
+        confidence: float = 0.5,  # Confidence score 0.0-1.0, default 0.5
+        # Outcome spectrum fields
+        outcome_status: Optional[str] = None,  # 'pending', 'success', 'partial', 'failed', 'superseded'
+        fixed: Optional[List[str]] = None,
+        did_not_fix: Optional[List[str]] = None,
+        caused: Optional[List[str]] = None,
+        superseded_by: Optional[int] = None,
+        # Context tagging fields
+        worked_in: Optional[List[Dict[str, Any]]] = None,
+        failed_in: Optional[List[Dict[str, Any]]] = None,
+        context_confidence: Optional[float] = None,
+        auto_detect_context: bool = True
     ) -> int:
         """Store a memory with full context.
 
         Also adds the embedding to the FAISS index for fast search.
+
+        Args:
+            confidence: Reliability score from 0.0 (unreliable) to 1.0 (proven). Default 0.5.
+
+        Outcome spectrum fields:
+        - outcome_status: Status of the solution ('pending', 'success', 'partial', 'failed', 'superseded')
+        - fixed: List of what this solution fixed
+        - did_not_fix: List of what remains unfixed
+        - caused: List of side effects this solution caused
+        - superseded_by: ID of memory that replaced this one
+
+        Context tagging fields:
+        - worked_in: List of contexts where this solution worked
+        - failed_in: List of contexts where this solution failed
+        - context_confidence: Context-specific confidence score
+        - auto_detect_context: If True and project_path provided, auto-detect context
         """
         # Normalize project path to prevent duplicates
         project_path = normalize_path(project_path)
+
+        # Auto-detect context from project_path if enabled
+        initial_context = None
+        if auto_detect_context and project_path:
+            try:
+                from skills.context import detect_project_context
+                initial_context = detect_project_context(project_path)
+                # Set worked_in to initial context if success is True
+                if success is True and initial_context and not worked_in:
+                    worked_in = [initial_context]
+                # Set failed_in to initial context if success is False
+                elif success is False and initial_context and not failed_in:
+                    failed_in = [initial_context]
+            except Exception:
+                pass  # Ignore context detection errors
+
+        # Default outcome_status to 'pending' for new memories
+        if outcome_status is None:
+            outcome_status = 'pending'
+
+        # Clamp confidence to valid range
+        confidence = max(0.0, min(1.0, confidence))
 
         cursor = self.conn.cursor()
         cursor.execute(
@@ -1243,8 +1410,10 @@ class DatabaseService:
                 session_id, chat_id,
                 agent_type, skill_used, tools_used,
                 outcome, success,
-                tags, importance
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tags, importance, confidence,
+                outcome_status, fixed, did_not_fix, caused, superseded_by,
+                worked_in, failed_in, context_confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 memory_type,
@@ -1263,7 +1432,16 @@ class DatabaseService:
                 outcome,
                 1 if success else (0 if success is False else None),
                 json.dumps(tags) if tags else None,
-                importance
+                importance,
+                confidence,
+                outcome_status,
+                json.dumps(fixed) if fixed else None,
+                json.dumps(did_not_fix) if did_not_fix else None,
+                json.dumps(caused) if caused else None,
+                superseded_by,
+                json.dumps(worked_in) if worked_in else None,
+                json.dumps(failed_in) if failed_in else None,
+                context_confidence
             )
         )
         self.conn.commit()
@@ -1284,12 +1462,31 @@ class DatabaseService:
         project_path: Optional[str] = None,
         agent_type: Optional[str] = None,
         success_only: bool = False,
-        threshold: float = 0.5
+        threshold: float = 0.5,
+        # Outcome spectrum filters
+        include_failed: bool = False,
+        include_superseded: bool = False,
+        include_unreliable: bool = False,
+        outcome_status: Optional[str] = None,
+        # Context-aware search
+        current_context: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Search for similar memories with optional filters.
 
         Uses FAISS index for fast similarity search when available,
         falls back to numpy-based linear search otherwise.
+
+        Outcome-aware search behavior:
+        - 'success' memories rank highest (1.5x boost)
+        - 'partial' memories shown with warning (1.0x - no penalty)
+        - 'failed' memories excluded by default (use include_failed=True to show)
+        - 'superseded' memories excluded and replaced with their superseding memory
+        - 'pending' memories shown normally (1.0x)
+        - Memories with failure_count >= 3 are excluded by default (use include_unreliable=True)
+
+        Context-aware search:
+        - If current_context provided, memories that worked in similar contexts get +0.2 boost
+        - Memories that failed in similar contexts get -0.2 penalty
         """
         # Normalize project path for consistent matching
         project_path = normalize_path(project_path)
@@ -1323,7 +1520,9 @@ class DatabaseService:
                     SELECT id, type, content, metadata,
                            project_path, project_name, project_type, tech_stack,
                            session_id, chat_id, agent_type, skill_used, tools_used,
-                           outcome, success, tags, importance, created_at
+                           outcome, success, tags, importance, confidence, created_at,
+                           outcome_status, fixed, did_not_fix, caused, superseded_by,
+                           worked_in, failed_in, context_confidence
                     FROM memories WHERE id IN ({placeholders})
                 """
                 params = list(candidate_ids)
@@ -1343,12 +1542,78 @@ class DatabaseService:
                 if success_only:
                     query += " AND success = 1"
 
+                # Outcome spectrum filters
+                if outcome_status:
+                    query += " AND outcome_status = ?"
+                    params.append(outcome_status)
+                else:
+                    # Default behavior: exclude failed and superseded
+                    if not include_failed:
+                        query += " AND (outcome_status IS NULL OR outcome_status != 'failed')"
+                    if not include_superseded:
+                        query += " AND (outcome_status IS NULL OR outcome_status != 'superseded')"
+
+                # Exclude unreliable memories (failure_count >= 3) by default
+                if not include_unreliable:
+                    query += " AND (failure_count IS NULL OR failure_count < 3)"
+
                 cursor.execute(query, params)
                 rows = cursor.fetchall()
 
                 results = []
+                superseding_memories = {}  # Cache for superseding memories
+
+                # Import context scoring if current_context provided
+                context_scorer = None
+                if current_context:
+                    try:
+                        from skills.context import calculate_context_similarity
+                        context_scorer = calculate_context_similarity
+                    except ImportError:
+                        pass
+
                 for row in rows:
                     similarity = similarity_map.get(row["id"], 0)
+
+                    # Calculate outcome-based ranking boost
+                    row_outcome_status = row["outcome_status"] if "outcome_status" in row.keys() else None
+                    outcome_boost = 1.0
+                    outcome_warning = None
+                    if row_outcome_status == 'success':
+                        outcome_boost = 1.5  # Boost successful solutions
+                    elif row_outcome_status == 'partial':
+                        outcome_warning = "This solution only partially worked"
+                    elif row_outcome_status == 'failed':
+                        outcome_boost = 0.5  # Penalize failed solutions
+                        outcome_warning = "This solution failed previously"
+
+                    # Calculate context-based adjustment
+                    context_adjustment = 0.0
+                    context_recommendation = None
+                    if context_scorer and current_context:
+                        worked_in = json.loads(row["worked_in"]) if ("worked_in" in row.keys() and row["worked_in"]) else []
+                        failed_in = json.loads(row["failed_in"]) if ("failed_in" in row.keys() and row["failed_in"]) else []
+
+                        # Calculate similarity to worked_in contexts (boost)
+                        max_success_sim = 0.0
+                        for ctx in worked_in:
+                            sim = context_scorer(current_context, ctx)
+                            max_success_sim = max(max_success_sim, sim)
+
+                        # Calculate similarity to failed_in contexts (penalty)
+                        max_failure_sim = 0.0
+                        for ctx in failed_in:
+                            sim = context_scorer(current_context, ctx)
+                            max_failure_sim = max(max_failure_sim, sim)
+
+                        # Context adjustment: +0.2 for worked_in match, -0.2 for failed_in match
+                        context_adjustment = (max_success_sim * 0.2) - (max_failure_sim * 0.2)
+
+                        if context_adjustment > 0.1:
+                            context_recommendation = "recommended_for_context"
+                        elif context_adjustment < -0.1:
+                            context_recommendation = "caution_different_context"
+
                     results.append({
                         "id": row["id"],
                         "type": row["type"],
@@ -1369,14 +1634,32 @@ class DatabaseService:
                         },
                         "outcome": row["outcome"],
                         "success": bool(row["success"]) if row["success"] is not None else None,
+                        "outcome_status": row_outcome_status,
+                        "outcome_boost": outcome_boost,
+                        "outcome_warning": outcome_warning,
+                        "context_adjustment": context_adjustment,
+                        "context_recommendation": context_recommendation,
+                        "fixed": json.loads(row["fixed"]) if ("fixed" in row.keys() and row["fixed"]) else None,
+                        "did_not_fix": json.loads(row["did_not_fix"]) if ("did_not_fix" in row.keys() and row["did_not_fix"]) else None,
+                        "caused": json.loads(row["caused"]) if ("caused" in row.keys() and row["caused"]) else None,
+                        "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
+                        "worked_in": json.loads(row["worked_in"]) if ("worked_in" in row.keys() and row["worked_in"]) else None,
+                        "failed_in": json.loads(row["failed_in"]) if ("failed_in" in row.keys() and row["failed_in"]) else None,
+                        "context_confidence": row["context_confidence"] if "context_confidence" in row.keys() else None,
                         "tags": json.loads(row["tags"]) if row["tags"] else None,
                         "importance": row["importance"],
+                        "confidence": row["confidence"] if row["confidence"] is not None else 0.5,
                         "created_at": row["created_at"],
                         "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
                     })
 
-                # Sort by similarity * importance for better ranking
-                results.sort(key=lambda x: x["similarity"] * (x["importance"] / 10), reverse=True)
+                # Sort by combined score: (similarity * 0.7) + (confidence * 0.3) + context_adjustment
+                # This ranking prioritizes semantic relevance while boosting high-confidence memories
+                # and adjusting for context compatibility
+                results.sort(
+                    key=lambda x: (x["similarity"] * 0.7) + (x["confidence"] * 0.3) + x.get("context_adjustment", 0.0),
+                    reverse=True
+                )
 
                 # Update last_accessed for returned results
                 if results:
@@ -1394,7 +1677,9 @@ class DatabaseService:
             SELECT id, type, content, embedding, metadata,
                    project_path, project_name, project_type, tech_stack,
                    session_id, chat_id, agent_type, skill_used, tools_used,
-                   outcome, success, tags, importance, created_at
+                   outcome, success, tags, importance, confidence, created_at,
+                   outcome_status, fixed, did_not_fix, caused, superseded_by,
+                   worked_in, failed_in, context_confidence
             FROM memories WHERE 1=1
         """
         params = []
@@ -1414,15 +1699,75 @@ class DatabaseService:
         if success_only:
             query += " AND success = 1"
 
+        # Outcome spectrum filters for numpy fallback
+        if outcome_status:
+            query += " AND outcome_status = ?"
+            params.append(outcome_status)
+        else:
+            if not include_failed:
+                query += " AND (outcome_status IS NULL OR outcome_status != 'failed')"
+            if not include_superseded:
+                query += " AND (outcome_status IS NULL OR outcome_status != 'superseded')"
+
+        # Exclude unreliable memories (failure_count >= 3) by default
+        if not include_unreliable:
+            query += " AND (failure_count IS NULL OR failure_count < 3)"
+
         cursor.execute(query, params)
         rows = cursor.fetchall()
 
         results = []
+
+        # Import context scoring if current_context provided
+        context_scorer = None
+        if current_context:
+            try:
+                from skills.context import calculate_context_similarity
+                context_scorer = calculate_context_similarity
+            except ImportError:
+                pass
+
         for row in rows:
             stored_embedding = self._deserialize_embedding(row["embedding"])
             if stored_embedding:
                 similarity = self._cosine_similarity(embedding, stored_embedding)
                 if similarity >= threshold:
+                    # Calculate outcome-based ranking boost
+                    row_outcome_status = row["outcome_status"] if "outcome_status" in row.keys() else None
+                    outcome_boost = 1.0
+                    outcome_warning = None
+                    if row_outcome_status == 'success':
+                        outcome_boost = 1.5
+                    elif row_outcome_status == 'partial':
+                        outcome_warning = "This solution only partially worked"
+                    elif row_outcome_status == 'failed':
+                        outcome_boost = 0.5
+                        outcome_warning = "This solution failed previously"
+
+                    # Calculate context-based adjustment
+                    context_adjustment = 0.0
+                    context_recommendation = None
+                    if context_scorer and current_context:
+                        worked_in = json.loads(row["worked_in"]) if ("worked_in" in row.keys() and row["worked_in"]) else []
+                        failed_in = json.loads(row["failed_in"]) if ("failed_in" in row.keys() and row["failed_in"]) else []
+
+                        max_success_sim = 0.0
+                        for ctx in worked_in:
+                            sim = context_scorer(current_context, ctx)
+                            max_success_sim = max(max_success_sim, sim)
+
+                        max_failure_sim = 0.0
+                        for ctx in failed_in:
+                            sim = context_scorer(current_context, ctx)
+                            max_failure_sim = max(max_failure_sim, sim)
+
+                        context_adjustment = (max_success_sim * 0.2) - (max_failure_sim * 0.2)
+
+                        if context_adjustment > 0.1:
+                            context_recommendation = "recommended_for_context"
+                        elif context_adjustment < -0.1:
+                            context_recommendation = "caution_different_context"
+
                     results.append({
                         "id": row["id"],
                         "type": row["type"],
@@ -1443,14 +1788,30 @@ class DatabaseService:
                         },
                         "outcome": row["outcome"],
                         "success": bool(row["success"]) if row["success"] is not None else None,
+                        "outcome_status": row_outcome_status,
+                        "outcome_boost": outcome_boost,
+                        "outcome_warning": outcome_warning,
+                        "context_adjustment": context_adjustment,
+                        "context_recommendation": context_recommendation,
+                        "fixed": json.loads(row["fixed"]) if ("fixed" in row.keys() and row["fixed"]) else None,
+                        "did_not_fix": json.loads(row["did_not_fix"]) if ("did_not_fix" in row.keys() and row["did_not_fix"]) else None,
+                        "caused": json.loads(row["caused"]) if ("caused" in row.keys() and row["caused"]) else None,
+                        "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
+                        "worked_in": json.loads(row["worked_in"]) if ("worked_in" in row.keys() and row["worked_in"]) else None,
+                        "failed_in": json.loads(row["failed_in"]) if ("failed_in" in row.keys() and row["failed_in"]) else None,
+                        "context_confidence": row["context_confidence"] if "context_confidence" in row.keys() else None,
                         "tags": json.loads(row["tags"]) if row["tags"] else None,
                         "importance": row["importance"],
+                        "confidence": row["confidence"] if row["confidence"] is not None else 0.5,
                         "created_at": row["created_at"],
                         "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
                     })
 
-        # Sort by similarity * importance for better ranking
-        results.sort(key=lambda x: x["similarity"] * (x["importance"] / 10), reverse=True)
+        # Sort by combined score including outcome boost and context adjustment
+        results.sort(
+            key=lambda x: ((x["similarity"] * 0.7) + (x["confidence"] * 0.3) + x.get("context_adjustment", 0.0)) * x.get("outcome_boost", 1.0),
+            reverse=True
+        )
 
         # Update last_accessed for returned results
         if results:
@@ -1463,6 +1824,52 @@ class DatabaseService:
 
         return results[:limit]
 
+    async def update_memory_confidence(
+        self,
+        memory_id: int,
+        confidence: float
+    ) -> Dict[str, Any]:
+        """Update the confidence score for a memory.
+
+        Args:
+            memory_id: ID of the memory to update
+            confidence: New confidence score (0.0 to 1.0)
+
+        Returns:
+            Dict with success status and updated confidence
+        """
+        # Clamp confidence to valid range
+        confidence = max(0.0, min(1.0, confidence))
+
+        cursor = self.conn.cursor()
+
+        # Check if memory exists
+        cursor.execute("SELECT id, confidence FROM memories WHERE id = ?", [memory_id])
+        row = cursor.fetchone()
+
+        if not row:
+            return {
+                "success": False,
+                "error": f"Memory with ID {memory_id} not found"
+            }
+
+        old_confidence = row["confidence"] if row["confidence"] is not None else 0.5
+
+        # Update confidence
+        cursor.execute(
+            "UPDATE memories SET confidence = ?, updated_at = datetime('now') WHERE id = ?",
+            [confidence, memory_id]
+        )
+        self.conn.commit()
+
+        return {
+            "success": True,
+            "memory_id": memory_id,
+            "old_confidence": old_confidence,
+            "new_confidence": confidence,
+            "message": f"Confidence updated from {old_confidence:.3f} to {confidence:.3f}"
+        }
+
     async def keyword_search(
         self,
         query: str,
@@ -1471,12 +1878,18 @@ class DatabaseService:
         session_id: Optional[str] = None,
         project_path: Optional[str] = None,
         agent_type: Optional[str] = None,
-        success_only: bool = False
+        success_only: bool = False,
+        include_failed: bool = False,
+        include_superseded: bool = False,
+        include_unreliable: bool = False,
+        outcome_status: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Fallback keyword search when embeddings are unavailable.
 
         Uses SQLite FTS-like matching with LIKE queries on content.
         Results are ranked by keyword match count and importance.
+        Supports outcome spectrum filtering.
+        Excludes unreliable memories (failure_count >= 3) by default.
         """
         # Normalize project path for consistent matching
         project_path = normalize_path(project_path)
@@ -1493,7 +1906,8 @@ class DatabaseService:
             SELECT id, type, content, metadata,
                    project_path, project_name, project_type, tech_stack,
                    session_id, chat_id, agent_type, skill_used, tools_used,
-                   outcome, success, tags, importance, created_at
+                   outcome, success, tags, importance, confidence, created_at,
+                   outcome_status, fixed, did_not_fix, caused, superseded_by
             FROM memories WHERE 1=1
         """
         params = []
@@ -1512,6 +1926,20 @@ class DatabaseService:
             params.append(agent_type)
         if success_only:
             sql += " AND success = 1"
+
+        # Outcome spectrum filters
+        if outcome_status:
+            sql += " AND outcome_status = ?"
+            params.append(outcome_status)
+        else:
+            if not include_failed:
+                sql += " AND (outcome_status IS NULL OR outcome_status != 'failed')"
+            if not include_superseded:
+                sql += " AND (outcome_status IS NULL OR outcome_status != 'superseded')"
+
+        # Exclude unreliable memories (failure_count >= 3) by default
+        if not include_unreliable:
+            sql += " AND (failure_count IS NULL OR failure_count < 3)"
 
         # Add keyword conditions (OR matching)
         keyword_conditions = []
@@ -1535,6 +1963,18 @@ class DatabaseService:
             match_count = sum(1 for kw in keywords if kw in content_lower)
             keyword_score = match_count / len(keywords) if keywords else 0
 
+            # Calculate outcome-based ranking boost
+            row_outcome_status = row["outcome_status"] if "outcome_status" in row.keys() else None
+            outcome_boost = 1.0
+            outcome_warning = None
+            if row_outcome_status == 'success':
+                outcome_boost = 1.5
+            elif row_outcome_status == 'partial':
+                outcome_warning = "This solution only partially worked"
+            elif row_outcome_status == 'failed':
+                outcome_boost = 0.5
+                outcome_warning = "This solution failed previously"
+
             results.append({
                 "id": row["id"],
                 "type": row["type"],
@@ -1556,14 +1996,25 @@ class DatabaseService:
                 },
                 "outcome": row["outcome"],
                 "success": bool(row["success"]) if row["success"] is not None else None,
+                "outcome_status": row_outcome_status,
+                "outcome_boost": outcome_boost,
+                "outcome_warning": outcome_warning,
+                "fixed": json.loads(row["fixed"]) if ("fixed" in row.keys() and row["fixed"]) else None,
+                "did_not_fix": json.loads(row["did_not_fix"]) if ("did_not_fix" in row.keys() and row["did_not_fix"]) else None,
+                "caused": json.loads(row["caused"]) if ("caused" in row.keys() and row["caused"]) else None,
+                "superseded_by": row["superseded_by"] if "superseded_by" in row.keys() else None,
                 "tags": json.loads(row["tags"]) if row["tags"] else None,
                 "importance": row["importance"],
+                "confidence": row["confidence"] if ("confidence" in row.keys() and row["confidence"] is not None) else 0.5,
                 "created_at": row["created_at"],
                 "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
             })
 
-        # Sort by keyword score * importance
-        results.sort(key=lambda x: x["similarity"] * (x["importance"] / 10), reverse=True)
+        # Sort by: (keyword_score * 0.7) + (confidence * 0.3) * outcome_boost
+        results.sort(
+            key=lambda x: ((x["similarity"] * 0.7) + (x["confidence"] * 0.3)) * x.get("outcome_boost", 1.0),
+            reverse=True
+        )
 
         # Update last_accessed for returned results
         if results:
@@ -1776,6 +2227,194 @@ class DatabaseService:
         else:
             cursor.execute("UPDATE patterns SET failure_count = failure_count + 1 WHERE id = ?", (pattern_id,))
         self.conn.commit()
+
+    async def update_memory_outcome(
+        self,
+        memory_id: int,
+        outcome_status: Optional[str] = None,
+        fixed: Optional[List[str]] = None,
+        did_not_fix: Optional[List[str]] = None,
+        caused: Optional[List[str]] = None,
+        superseded_by: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Update the outcome status and details for a memory.
+
+        Args:
+            memory_id: The ID of the memory to update
+            outcome_status: New status ('pending', 'success', 'partial', 'failed', 'superseded')
+            fixed: List of what this solution fixed (appends to existing)
+            did_not_fix: List of what remains unfixed (appends to existing)
+            caused: List of side effects (appends to existing)
+            superseded_by: ID of the memory that replaces this one
+
+        Returns:
+            Dict with update status and updated memory info
+        """
+        valid_statuses = {'pending', 'success', 'partial', 'failed', 'superseded'}
+        if outcome_status and outcome_status not in valid_statuses:
+            raise ValueError(f"Invalid outcome_status: {outcome_status}. Must be one of {valid_statuses}")
+
+        cursor = self.conn.cursor()
+
+        # Get current memory state
+        cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"success": False, "error": f"Memory {memory_id} not found"}
+
+        # Build update query
+        updates = []
+        params = []
+
+        if outcome_status:
+            updates.append("outcome_status = ?")
+            params.append(outcome_status)
+            # Also update the legacy success field for compatibility
+            if outcome_status == 'success':
+                updates.append("success = 1")
+            elif outcome_status == 'failed':
+                updates.append("success = 0")
+
+        # For list fields, merge with existing
+        if fixed:
+            existing = json.loads(row["fixed"]) if row["fixed"] else []
+            merged = list(set(existing + fixed))
+            updates.append("fixed = ?")
+            params.append(json.dumps(merged))
+
+        if did_not_fix:
+            existing = json.loads(row["did_not_fix"]) if row["did_not_fix"] else []
+            merged = list(set(existing + did_not_fix))
+            updates.append("did_not_fix = ?")
+            params.append(json.dumps(merged))
+
+        if caused:
+            existing = json.loads(row["caused"]) if row["caused"] else []
+            merged = list(set(existing + caused))
+            updates.append("caused = ?")
+            params.append(json.dumps(merged))
+
+        if superseded_by is not None:
+            updates.append("superseded_by = ?")
+            params.append(superseded_by)
+            # Auto-set status to superseded if not explicitly set
+            if not outcome_status:
+                updates.append("outcome_status = 'superseded'")
+
+        updates.append("updated_at = datetime('now')")
+
+        if updates:
+            query = f"UPDATE memories SET {', '.join(updates)} WHERE id = ?"
+            params.append(memory_id)
+            cursor.execute(query, params)
+            self.conn.commit()
+
+        return {
+            "success": True,
+            "memory_id": memory_id,
+            "outcome_status": outcome_status or row["outcome_status"],
+            "message": f"Memory {memory_id} outcome updated"
+        }
+
+    async def supersede_memory(
+        self,
+        old_memory_id: int,
+        new_memory_id: int,
+        reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Mark a memory as superseded by another memory.
+
+        This is a convenience method that:
+        1. Sets the old memory's status to 'superseded'
+        2. Sets its superseded_by field to point to the new memory
+        3. Optionally stores the reason in metadata
+
+        Args:
+            old_memory_id: The memory being replaced
+            new_memory_id: The memory that replaces it
+            reason: Optional reason for supersession
+
+        Returns:
+            Dict with operation status
+        """
+        cursor = self.conn.cursor()
+
+        # Verify both memories exist
+        cursor.execute("SELECT id FROM memories WHERE id = ?", (old_memory_id,))
+        if not cursor.fetchone():
+            return {"success": False, "error": f"Memory {old_memory_id} not found"}
+
+        cursor.execute("SELECT id FROM memories WHERE id = ?", (new_memory_id,))
+        if not cursor.fetchone():
+            return {"success": False, "error": f"Memory {new_memory_id} not found"}
+
+        # Update the old memory
+        update_result = await self.update_memory_outcome(
+            memory_id=old_memory_id,
+            outcome_status='superseded',
+            superseded_by=new_memory_id
+        )
+
+        if not update_result.get("success"):
+            return update_result
+
+        # Store reason in metadata if provided
+        if reason:
+            cursor.execute("SELECT metadata FROM memories WHERE id = ?", (old_memory_id,))
+            row = cursor.fetchone()
+            metadata = json.loads(row["metadata"]) if row["metadata"] else {}
+            metadata["supersession_reason"] = reason
+            metadata["superseded_at"] = datetime.now().isoformat()
+            cursor.execute(
+                "UPDATE memories SET metadata = ? WHERE id = ?",
+                (json.dumps(metadata), old_memory_id)
+            )
+            self.conn.commit()
+
+        return {
+            "success": True,
+            "old_memory_id": old_memory_id,
+            "new_memory_id": new_memory_id,
+            "reason": reason,
+            "message": f"Memory {old_memory_id} superseded by {new_memory_id}"
+        }
+
+    async def get_superseding_memory(self, memory_id: int) -> Optional[Dict[str, Any]]:
+        """Get the memory that supersedes the given memory, if any.
+
+        Follows the supersession chain to find the latest active memory.
+
+        Returns:
+            The latest superseding memory, or None if not superseded
+        """
+        cursor = self.conn.cursor()
+        visited = set()
+        current_id = memory_id
+
+        while True:
+            if current_id in visited:
+                # Circular reference detected
+                logger.warning(f"Circular supersession detected at memory {current_id}")
+                break
+            visited.add(current_id)
+
+            cursor.execute(
+                "SELECT id, superseded_by, outcome_status FROM memories WHERE id = ?",
+                (current_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                break
+
+            if row["superseded_by"] and row["outcome_status"] == 'superseded':
+                current_id = row["superseded_by"]
+            else:
+                # Found the latest non-superseded memory
+                if current_id != memory_id:
+                    return await self.get_memory(current_id)
+                return None
+
+        return None
 
     async def get_memory(self, memory_id: int) -> Optional[Dict[str, Any]]:
         """Retrieve a specific memory by ID."""
@@ -2456,3 +3095,543 @@ class DatabaseService:
                 error_code="DB_INTEGRITY_ERROR",
                 original_error=e
             )
+
+    # ============================================================
+    # KNOWLEDGE GRAPH RELATIONSHIP METHODS (Internal)
+    # ============================================================
+
+    async def create_relationship(
+        self,
+        source_id: int,
+        target_id: int,
+        relationship: str,
+        strength: float = 1.0
+    ) -> dict:
+        """Create a relationship between two memories.
+
+        Relationship types:
+            - fixes: source memory fixes the issue in target
+            - caused_by: source issue was caused by target
+            - supports: source evidence supports target conclusion
+            - contradicts: source contradicts target
+            - related: general semantic relationship
+            - follows: source chronologically follows target
+
+        Args:
+            source_id: ID of the source memory
+            target_id: ID of the target memory
+            relationship: Type of relationship
+            strength: Relationship strength (0.0 to 1.0)
+
+        Returns:
+            Dict with relationship details or error
+        """
+        valid_relationships = {'fixes', 'caused_by', 'supports', 'contradicts', 'related', 'follows'}
+        if relationship not in valid_relationships:
+            return {
+                "success": False,
+                "error": f"Invalid relationship type. Must be one of: {valid_relationships}"
+            }
+
+        # Verify both memories exist
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM memories WHERE id IN (?, ?)", (source_id, target_id))
+        existing = {row["id"] for row in cursor.fetchall()}
+
+        if source_id not in existing:
+            return {"success": False, "error": f"Source memory {source_id} not found"}
+        if target_id not in existing:
+            return {"success": False, "error": f"Target memory {target_id} not found"}
+
+        try:
+            cursor.execute("""
+                INSERT INTO memory_relationships (source_id, target_id, relationship, strength)
+                VALUES (?, ?, ?, ?)
+            """, (source_id, target_id, relationship, strength))
+            self.conn.commit()
+
+            return {
+                "success": True,
+                "id": cursor.lastrowid,
+                "source_id": source_id,
+                "target_id": target_id,
+                "relationship": relationship,
+                "strength": strength
+            }
+        except sqlite3.IntegrityError:
+            # Relationship already exists, update strength
+            cursor.execute("""
+                UPDATE memory_relationships
+                SET strength = ?, created_at = CURRENT_TIMESTAMP
+                WHERE source_id = ? AND target_id = ? AND relationship = ?
+            """, (strength, source_id, target_id, relationship))
+            self.conn.commit()
+
+            return {
+                "success": True,
+                "updated": True,
+                "source_id": source_id,
+                "target_id": target_id,
+                "relationship": relationship,
+                "strength": strength
+            }
+
+    async def get_related_memories(
+        self,
+        memory_id: int,
+        relationship: str = None,
+        direction: str = 'both',
+        depth: int = 1
+    ) -> list:
+        """Get memories related to this one.
+
+        Args:
+            memory_id: ID of the memory to find relationships for
+            relationship: Optional filter by relationship type
+            direction: 'outgoing' (this->other), 'incoming' (other->this), 'both'
+            depth: How many levels deep to traverse (1 = direct only)
+
+        Returns:
+            List of related memories with relationship info
+        """
+        cursor = self.conn.cursor()
+        results = []
+        visited = {memory_id}
+
+        async def traverse(current_id: int, current_depth: int):
+            if current_depth > depth:
+                return
+
+            # Build query based on direction
+            queries = []
+            if direction in ('outgoing', 'both'):
+                q = """
+                    SELECT mr.target_id as related_id, mr.relationship, mr.strength, 'outgoing' as direction,
+                           m.type, m.content, m.project_path, m.importance, m.created_at
+                    FROM memory_relationships mr
+                    JOIN memories m ON m.id = mr.target_id
+                    WHERE mr.source_id = ?
+                """
+                params = [current_id]
+                if relationship:
+                    q += " AND mr.relationship = ?"
+                    params.append(relationship)
+                queries.append((q, params))
+
+            if direction in ('incoming', 'both'):
+                q = """
+                    SELECT mr.source_id as related_id, mr.relationship, mr.strength, 'incoming' as direction,
+                           m.type, m.content, m.project_path, m.importance, m.created_at
+                    FROM memory_relationships mr
+                    JOIN memories m ON m.id = mr.source_id
+                    WHERE mr.target_id = ?
+                """
+                params = [current_id]
+                if relationship:
+                    q += " AND mr.relationship = ?"
+                    params.append(relationship)
+                queries.append((q, params))
+
+            for query, params in queries:
+                cursor.execute(query, params)
+                for row in cursor.fetchall():
+                    related_id = row["related_id"]
+                    if related_id not in visited:
+                        visited.add(related_id)
+                        results.append({
+                            "id": related_id,
+                            "relationship": row["relationship"],
+                            "strength": row["strength"],
+                            "direction": row["direction"],
+                            "depth": current_depth,
+                            "type": row["type"],
+                            "content": row["content"][:200] + "..." if len(row["content"]) > 200 else row["content"],
+                            "project_path": row["project_path"],
+                            "importance": row["importance"],
+                            "created_at": row["created_at"]
+                        })
+
+                        # Recurse for deeper traversal
+                        if current_depth < depth:
+                            await traverse(related_id, current_depth + 1)
+
+        await traverse(memory_id, 1)
+        return results
+
+    async def get_causal_chain(self, memory_id: int, max_depth: int = 5) -> dict:
+        """Traverse the fixes/caused_by chain to find root cause and all fixes.
+
+        Args:
+            memory_id: Starting memory ID
+            max_depth: Maximum traversal depth to prevent infinite loops
+
+        Returns:
+            Dict with root_causes, fixes, and the full chain
+        """
+        cursor = self.conn.cursor()
+
+        root_causes = []
+        fixes = []
+        chain = []
+        visited = {memory_id}
+
+        # Traverse backwards to find root causes (caused_by)
+        async def find_causes(current_id: int, depth: int):
+            if depth > max_depth:
+                return
+
+            cursor.execute("""
+                SELECT mr.target_id, m.type, m.content, m.project_path, m.created_at
+                FROM memory_relationships mr
+                JOIN memories m ON m.id = mr.target_id
+                WHERE mr.source_id = ? AND mr.relationship = 'caused_by'
+            """, (current_id,))
+
+            rows = cursor.fetchall()
+            if not rows:
+                # No more causes, this is a root cause
+                cursor.execute("SELECT * FROM memories WHERE id = ?", (current_id,))
+                row = cursor.fetchone()
+                if row and current_id != memory_id:
+                    root_causes.append({
+                        "id": current_id,
+                        "type": row["type"],
+                        "content": row["content"][:200] + "..." if len(row["content"]) > 200 else row["content"],
+                        "project_path": row["project_path"],
+                        "created_at": row["created_at"]
+                    })
+            else:
+                for row in rows:
+                    target_id = row["target_id"]
+                    if target_id not in visited:
+                        visited.add(target_id)
+                        chain.append({
+                            "from": current_id,
+                            "to": target_id,
+                            "relationship": "caused_by"
+                        })
+                        await find_causes(target_id, depth + 1)
+
+        # Traverse forwards to find fixes
+        async def find_fixes(current_id: int, depth: int):
+            if depth > max_depth:
+                return
+
+            cursor.execute("""
+                SELECT mr.source_id, m.type, m.content, m.project_path, m.created_at, m.success
+                FROM memory_relationships mr
+                JOIN memories m ON m.id = mr.source_id
+                WHERE mr.target_id = ? AND mr.relationship = 'fixes'
+            """, (current_id,))
+
+            for row in cursor.fetchall():
+                source_id = row["source_id"]
+                if source_id not in visited:
+                    visited.add(source_id)
+                    fixes.append({
+                        "id": source_id,
+                        "type": row["type"],
+                        "content": row["content"][:200] + "..." if len(row["content"]) > 200 else row["content"],
+                        "project_path": row["project_path"],
+                        "created_at": row["created_at"],
+                        "success": bool(row["success"]) if row["success"] is not None else None
+                    })
+                    chain.append({
+                        "from": source_id,
+                        "to": current_id,
+                        "relationship": "fixes"
+                    })
+                    await find_fixes(source_id, depth + 1)
+
+        await find_causes(memory_id, 1)
+        # Reset visited for fix traversal but keep memory_id
+        visited = {memory_id}
+        await find_fixes(memory_id, 1)
+
+        return {
+            "memory_id": memory_id,
+            "root_causes": root_causes,
+            "fixes": fixes,
+            "chain": chain,
+            "total_related": len(root_causes) + len(fixes)
+        }
+
+    async def find_contradictions(self, memory_id: int) -> list:
+        """Find memories that contradict this one.
+
+        Args:
+            memory_id: Memory to find contradictions for
+
+        Returns:
+            List of contradicting memories
+        """
+        cursor = self.conn.cursor()
+
+        # Get contradictions in both directions
+        cursor.execute("""
+            SELECT m.id, m.type, m.content, m.project_path, m.importance, m.created_at,
+                   mr.strength, 'outgoing' as direction
+            FROM memory_relationships mr
+            JOIN memories m ON m.id = mr.target_id
+            WHERE mr.source_id = ? AND mr.relationship = 'contradicts'
+            UNION ALL
+            SELECT m.id, m.type, m.content, m.project_path, m.importance, m.created_at,
+                   mr.strength, 'incoming' as direction
+            FROM memory_relationships mr
+            JOIN memories m ON m.id = mr.source_id
+            WHERE mr.target_id = ? AND mr.relationship = 'contradicts'
+        """, (memory_id, memory_id))
+
+        contradictions = []
+        seen = set()
+        for row in cursor.fetchall():
+            if row["id"] not in seen:
+                seen.add(row["id"])
+                contradictions.append({
+                    "id": row["id"],
+                    "type": row["type"],
+                    "content": row["content"][:200] + "..." if len(row["content"]) > 200 else row["content"],
+                    "project_path": row["project_path"],
+                    "importance": row["importance"],
+                    "created_at": row["created_at"],
+                    "contradiction_strength": row["strength"]
+                })
+
+        return contradictions
+
+    async def get_graph_data(self, project_path: str = None, limit: int = 200) -> dict:
+        """Get nodes and edges for graph visualization.
+
+        Args:
+            project_path: Optional filter by project
+            limit: Maximum number of nodes to return
+
+        Returns:
+            Dict with nodes, edges, and stats for visualization
+        """
+        project_path = normalize_path(project_path)
+        cursor = self.conn.cursor()
+
+        # Get nodes (memories)
+        if project_path:
+            cursor.execute("""
+                SELECT id, type, content, project_path, importance, created_at
+                FROM memories
+                WHERE project_path = ?
+                ORDER BY importance DESC, created_at DESC
+                LIMIT ?
+            """, (project_path, limit))
+        else:
+            cursor.execute("""
+                SELECT id, type, content, project_path, importance, created_at
+                FROM memories
+                ORDER BY importance DESC, created_at DESC
+                LIMIT ?
+            """, (limit,))
+
+        nodes = []
+        node_ids = set()
+        for row in cursor.fetchall():
+            node_ids.add(row["id"])
+            nodes.append({
+                "id": row["id"],
+                "type": row["type"],
+                "content": row["content"][:100] + "..." if len(row["content"]) > 100 else row["content"],
+                "project_path": row["project_path"],
+                "importance": row["importance"],
+                "created_at": row["created_at"]
+            })
+
+        # Get edges (relationships between these nodes)
+        if node_ids:
+            placeholders = ",".join("?" * len(node_ids))
+            cursor.execute(f"""
+                SELECT source_id, target_id, relationship, strength
+                FROM memory_relationships
+                WHERE source_id IN ({placeholders}) AND target_id IN ({placeholders})
+            """, list(node_ids) + list(node_ids))
+
+            edges = [
+                {
+                    "source": row["source_id"],
+                    "target": row["target_id"],
+                    "relationship": row["relationship"],
+                    "strength": row["strength"]
+                }
+                for row in cursor.fetchall()
+            ]
+        else:
+            edges = []
+
+        # Get stats
+        cursor.execute("SELECT COUNT(*) as total FROM memory_relationships")
+        total_relationships = cursor.fetchone()["total"]
+
+        cursor.execute("""
+            SELECT relationship, COUNT(*) as count
+            FROM memory_relationships
+            GROUP BY relationship
+        """)
+        relationship_counts = {row["relationship"]: row["count"] for row in cursor.fetchall()}
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "total_relationships_in_db": total_relationships,
+                "relationship_counts": relationship_counts
+            }
+        }
+
+    async def get_subgraph(self, memory_id: int, depth: int = 2) -> dict:
+        """Get connected subgraph from a starting node.
+
+        Args:
+            memory_id: Starting node ID
+            depth: How many hops to traverse
+
+        Returns:
+            Dict with nodes and edges in the subgraph
+        """
+        cursor = self.conn.cursor()
+
+        # Collect all connected node IDs
+        node_ids = {memory_id}
+        current_frontier = {memory_id}
+
+        for _ in range(depth):
+            if not current_frontier:
+                break
+
+            placeholders = ",".join("?" * len(current_frontier))
+
+            # Get connected nodes
+            cursor.execute(f"""
+                SELECT DISTINCT target_id as connected_id FROM memory_relationships
+                WHERE source_id IN ({placeholders})
+                UNION
+                SELECT DISTINCT source_id as connected_id FROM memory_relationships
+                WHERE target_id IN ({placeholders})
+            """, list(current_frontier) + list(current_frontier))
+
+            new_nodes = {row["connected_id"] for row in cursor.fetchall()}
+            current_frontier = new_nodes - node_ids
+            node_ids.update(new_nodes)
+
+        # Get node details
+        nodes = []
+        if node_ids:
+            placeholders = ",".join("?" * len(node_ids))
+            cursor.execute(f"""
+                SELECT id, type, content, project_path, importance, created_at
+                FROM memories
+                WHERE id IN ({placeholders})
+            """, list(node_ids))
+
+            for row in cursor.fetchall():
+                nodes.append({
+                    "id": row["id"],
+                    "type": row["type"],
+                    "content": row["content"][:100] + "..." if len(row["content"]) > 100 else row["content"],
+                    "project_path": row["project_path"],
+                    "importance": row["importance"],
+                    "created_at": row["created_at"],
+                    "is_center": row["id"] == memory_id
+                })
+
+            # Get edges between these nodes
+            cursor.execute(f"""
+                SELECT source_id, target_id, relationship, strength
+                FROM memory_relationships
+                WHERE source_id IN ({placeholders}) AND target_id IN ({placeholders})
+            """, list(node_ids) + list(node_ids))
+
+            edges = [
+                {
+                    "source": row["source_id"],
+                    "target": row["target_id"],
+                    "relationship": row["relationship"],
+                    "strength": row["strength"]
+                }
+                for row in cursor.fetchall()
+            ]
+        else:
+            edges = []
+
+        return {
+            "center_id": memory_id,
+            "depth": depth,
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges)
+            }
+        }
+
+    async def get_relationship_stats(self, project_path: str = None) -> dict:
+        """Get counts of each relationship type.
+
+        Args:
+            project_path: Optional filter by project
+
+        Returns:
+            Dict with relationship statistics
+        """
+        project_path = normalize_path(project_path)
+        cursor = self.conn.cursor()
+
+        if project_path:
+            cursor.execute("""
+                SELECT mr.relationship, COUNT(*) as count
+                FROM memory_relationships mr
+                JOIN memories m ON m.id = mr.source_id
+                WHERE m.project_path = ?
+                GROUP BY mr.relationship
+                ORDER BY count DESC
+            """, (project_path,))
+        else:
+            cursor.execute("""
+                SELECT relationship, COUNT(*) as count
+                FROM memory_relationships
+                GROUP BY relationship
+                ORDER BY count DESC
+            """)
+
+        by_type = {row["relationship"]: row["count"] for row in cursor.fetchall()}
+
+        # Get total
+        total = sum(by_type.values())
+
+        # Get most connected memories
+        cursor.execute("""
+            SELECT m.id, m.type, m.content, COUNT(*) as connection_count
+            FROM memories m
+            JOIN (
+                SELECT source_id as memory_id FROM memory_relationships
+                UNION ALL
+                SELECT target_id as memory_id FROM memory_relationships
+            ) r ON r.memory_id = m.id
+            GROUP BY m.id
+            ORDER BY connection_count DESC
+            LIMIT 10
+        """)
+
+        most_connected = [
+            {
+                "id": row["id"],
+                "type": row["type"],
+                "content": row["content"][:100] + "..." if len(row["content"]) > 100 else row["content"],
+                "connection_count": row["connection_count"]
+            }
+            for row in cursor.fetchall()
+        ]
+
+        return {
+            "total_relationships": total,
+            "by_type": by_type,
+            "most_connected_memories": most_connected,
+            "project_path": project_path
+        }

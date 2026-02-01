@@ -276,7 +276,22 @@ def check_ollama() -> bool:
             return True
     except Exception:
         pass
-    print_warning("Ollama not detected - embeddings will be disabled until Ollama is running")
+
+    print_warning("Ollama not detected")
+    print("")
+    print("  " + "="*56)
+    print("  OLLAMA REQUIRED FOR SEMANTIC SEARCH")
+    print("  " + "="*56)
+    print("")
+    print("  The memory agent needs Ollama for embeddings.")
+    print("  Without it, semantic search will not work.")
+    print("")
+    print("  To install Ollama:")
+    print("    1. Download from: https://ollama.ai/download")
+    print("    2. Install and run: ollama pull nomic-embed-text")
+    print("    3. Start Ollama: ollama serve")
+    print("    4. Re-run this installer")
+    print("")
     return False
 
 
@@ -876,6 +891,23 @@ def main():
     # Step 8: Verify
     print_step(8, total_steps, "Verifying installation...")
     verify_installation()
+
+    # Step 9: Auto-start agent if Ollama is ready
+    print_step(9, total_steps, "Starting Memory Agent...")
+    if ollama_ok:
+        try:
+            subprocess.run(
+                [sys.executable, str(AGENT_DIR / "memory-agent"), "start"],
+                cwd=str(AGENT_DIR),
+                timeout=30
+            )
+            print_success("Memory Agent started!")
+        except Exception as e:
+            print_warning(f"Could not auto-start agent: {e}")
+            print("  Start manually with: claude-memory-agent start")
+    else:
+        print_warning("Skipping auto-start (Ollama not running)")
+        print("  After installing Ollama, run: claude-memory-agent start")
 
     # Done!
     print_post_install_instructions(config)

@@ -7,6 +7,11 @@ It fetches the current session context and outputs it to stdout,
 which Claude Code automatically injects into Claude's context.
 
 This is the REAL anti-hallucination layer - automatic, not relying on Claude to call tools.
+
+Moltbot-inspired additions:
+- Checks flush conditions (events > 50 or time > 30min)
+- Loads MEMORY.md content into grounding context
+- Loads today's daily log highlights
 """
 
 import os
@@ -210,6 +215,111 @@ def format_grounding_context(context: dict) -> str:
     return "\n".join(lines)
 
 
+def format_memory_md_context(memory_md: dict) -> str:
+    """Format MEMORY.md content for injection."""
+    if not memory_md or not memory_md.get("exists"):
+        return ""
+
+    summary = memory_md.get("summary", "")
+    if not summary:
+        return ""
+
+    lines = ["[CORE FACTS from MEMORY.md]"]
+    lines.append(summary)
+    lines.append("[/CORE FACTS]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_daily_highlights(highlights: dict) -> str:
+    """Format daily log highlights for injection."""
+    if not highlights or not highlights.get("highlights"):
+        return ""
+
+    entries = highlights.get("highlights", [])
+    if not entries:
+        return ""
+
+    lines = ["[TODAY'S HIGHLIGHTS from Daily Log]"]
+    for entry in entries[:5]:
+        lines.append(f"  - {entry}")
+    lines.append("[/TODAY'S HIGHLIGHTS]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def format_curator_context(curator_summary: dict, curator_status: dict) -> str:
+    """Format curator context for injection."""
+    if not curator_summary and not curator_status:
+        return ""
+
+    lines = ["[CURATOR CONTEXT]"]
+
+    # Knowledge graph summary
+    if curator_summary:
+        context = curator_summary.get("context", "")
+        if context:
+            lines.append("Relevant Knowledge:")
+            for line in context.split("\n")[:10]:
+                if line.strip():
+                    lines.append(f"  {line}")
+
+        # Graph relationships
+        graph_context = curator_summary.get("graph_context")
+        if graph_context and graph_context.get("summary"):
+            lines.append("")
+            lines.append(f"Graph: {graph_context['summary']}")
+
+        # Pending reviews
+        pending = curator_summary.get("pending_reviews", {})
+        if pending.get("total_pending", 0) > 0:
+            lines.append("")
+            lines.append("Pending Reviews:")
+            if pending.get("duplicate_clusters", 0) > 0:
+                lines.append(f"  - {pending['duplicate_clusters']} duplicate clusters")
+            if pending.get("suggested_links", 0) > 0:
+                lines.append(f"  - {pending['suggested_links']} suggested links")
+            if pending.get("orphan_memories", 0) > 0:
+                lines.append(f"  - {pending['orphan_memories']} orphan memories")
+
+    # Curator status summary
+    if curator_status:
+        orphan_count = curator_status.get("orphan_count", 0)
+        connection_ratio = curator_status.get("connection_ratio", 0)
+        if orphan_count > 10:
+            lines.append(f"Warning: {orphan_count} orphan memories need linking")
+        if connection_ratio < 0.5:
+            lines.append(f"Note: Low graph connectivity ({connection_ratio:.1%})")
+
+    lines.append("[/CURATOR CONTEXT]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def check_and_trigger_flush(session_id: str, project_path: str):
+    """Check if flush is needed and trigger it."""
+    # Check flush conditions
+    flush_check = call_memory_agent("check_flush_needed", {
+        "session_id": session_id
+    })
+
+    if flush_check and flush_check.get("flush_needed"):
+        reasons = flush_check.get("reasons", [])
+        logger.info(f"Flush needed: {', '.join(reasons)}")
+
+        # Trigger flush
+        flush_result = call_memory_agent("pre_compaction_flush", {
+            "project_path": project_path,
+            "session_id": session_id
+        })
+
+        if flush_result and flush_result.get("success"):
+            logger.info(f"Flush completed: {flush_result.get('file_path')}")
+
+
 def main():
     """Main entry point for the hook."""
     project_path = get_project_path()
@@ -229,7 +339,32 @@ def main():
         # No session, no grounding - exit silently
         sys.exit(0)
 
-    # Get grounding context
+    # ============================================================
+    # MOLTBOT-INSPIRED: Check flush conditions
+    # ============================================================
+    check_and_trigger_flush(session_id, project_path)
+
+    # ============================================================
+    # MOLTBOT-INSPIRED: Load MEMORY.md summary
+    # ============================================================
+    memory_md = call_memory_agent("get_memory_md_summary", {
+        "project_path": project_path
+    })
+
+    memory_md_context = format_memory_md_context(memory_md) if memory_md else ""
+
+    # ============================================================
+    # MOLTBOT-INSPIRED: Load today's daily log highlights
+    # ============================================================
+    daily_highlights = call_memory_agent("daily_log_highlights", {
+        "project_path": project_path
+    })
+
+    daily_context = format_daily_highlights(daily_highlights) if daily_highlights else ""
+
+    # ============================================================
+    # ORIGINAL: Get grounding context
+    # ============================================================
     context = call_memory_agent("context_refresh", {
         "session_id": session_id,
         "include_recent_events": 5,
@@ -238,10 +373,47 @@ def main():
         "check_contradictions": True
     })
 
-    if context:
-        grounding_text = format_grounding_context(context)
-        if grounding_text:
-            print(grounding_text)
+    grounding_context = format_grounding_context(context) if context else ""
+
+    # ============================================================
+    # CURATOR: Get curated context and status
+    # ============================================================
+    # Get curator summary for current context (lightweight)
+    curator_summary = None
+    curator_status = None
+
+    # Only fetch curator context if there's user input to contextualize
+    user_input = os.getenv("CLAUDE_USER_INPUT", "")
+    if user_input and len(user_input) > 10:
+        curator_summary = call_memory_agent("curator_get_summary", {
+            "query": user_input[:500],  # Limit query length
+            "project_path": project_path,
+            "max_memories": 5,
+            "include_graph": True
+        })
+
+    # Always get curator status for warnings
+    curator_status = call_memory_agent("curator_get_status", {})
+
+    curator_context = format_curator_context(curator_summary, curator_status)
+
+    # Combine all context
+    output_parts = []
+
+    if memory_md_context:
+        output_parts.append(memory_md_context)
+
+    if daily_context:
+        output_parts.append(daily_context)
+
+    if grounding_context:
+        output_parts.append(grounding_context)
+
+    if curator_context:
+        output_parts.append(curator_context)
+
+    if output_parts:
+        print("\n".join(output_parts))
 
     sys.exit(0)
 
