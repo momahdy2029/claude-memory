@@ -14,6 +14,17 @@ from dataclasses import dataclass, field
 from fastapi import WebSocket, WebSocketDisconnect
 
 
+def _normalize_ws_path(path: Optional[str]) -> Optional[str]:
+    """Normalize path for WebSocket comparison.
+
+    Converts backslashes to forward slashes and removes trailing slashes.
+    This ensures consistent path comparison across platforms.
+    """
+    if not path:
+        return None
+    return path.replace("\\", "/").rstrip("/")
+
+
 @dataclass
 class WebSocketClient:
     """Represents a connected WebSocket client."""
@@ -84,7 +95,8 @@ class WebSocketManager:
 
         client = self.clients[client_id]
         client.subscriptions = set(event_types)
-        client.project_filter = project_path
+        # Normalize path for consistent comparison
+        client.project_filter = _normalize_ws_path(project_path)
 
         await self._send_to_client(client_id, {
             "type": "subscribed",
@@ -101,15 +113,18 @@ class WebSocketManager:
             data: Event data payload
             project_path: Project this event relates to (for filtering)
         """
+        # Normalize the project path for consistent comparison
+        normalized_project = _normalize_ws_path(project_path)
+
         message = {
             "type": event_type,
             "data": data,
-            "project_path": project_path,
+            "project_path": normalized_project,
             "timestamp": time.time()
         }
 
         # Debug logging
-        print(f"[WS] Broadcasting {event_type} to {len(self.clients)} clients, project={project_path}")
+        print(f"[WS] Broadcasting {event_type} to {len(self.clients)} clients, project={normalized_project}")
 
         # Send to all matching clients
         disconnected = []
@@ -120,11 +135,11 @@ class WebSocketManager:
                 print(f"[WS] Skipping {client_id}: not subscribed to {event_type}")
                 continue
 
-            # Check project filter
+            # Check project filter (both are already normalized)
             # If project_path is None, send to all clients (global event)
             # If project_path is set, only send to matching clients
-            if project_path and client.project_filter and client.project_filter != project_path:
-                print(f"[WS] Skipping {client_id}: project mismatch ({client.project_filter} != {project_path})")
+            if normalized_project and client.project_filter and client.project_filter != normalized_project:
+                print(f"[WS] Skipping {client_id}: project mismatch ({client.project_filter} != {normalized_project})")
                 continue
 
             try:

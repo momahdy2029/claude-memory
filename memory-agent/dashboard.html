@@ -3232,6 +3232,13 @@
                     indicator.style.background = 'rgba(63, 185, 80, 0.1)';
                     indicator.style.color = 'var(--accent-green)';
                     text.textContent = 'Connected';
+                } else if (data.status === 'degraded') {
+                    // Degraded mode - server is connected but some features limited
+                    indicator.style.borderColor = 'rgba(227, 179, 65, 0.3)';
+                    indicator.style.background = 'rgba(227, 179, 65, 0.1)';
+                    indicator.style.color = 'var(--accent-yellow)';
+                    text.textContent = 'Degraded';
+                    text.title = 'Server connected but some features (like Ollama) are unavailable';
                 } else {
                     throw new Error('Unhealthy');
                 }
