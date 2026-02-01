@@ -232,10 +232,15 @@ class EventTypes:
     """Standard event types for broadcasting."""
     # Memory events
     MEMORY_STORED = "memory_stored"
+    MEMORY_UPDATED = "memory_updated"
     MEMORY_SEARCHED = "memory_searched"
     MEMORY_DELETED = "memory_deleted"
     MEMORY_ARCHIVED = "memory_archived"
     MEMORY_RESTORED = "memory_restored"
+
+    # Relationship/Link events
+    LINK_CREATED = "link_created"
+    LINK_DELETED = "link_deleted"
 
     # Timeline events
     TIMELINE_LOGGED = "timeline_logged"

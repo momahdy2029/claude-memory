@@ -204,6 +204,27 @@
             border-radius: 50%;
             animation: pulse 2s infinite;
         }
+        .retry-btn {
+            background: transparent;
+            border: 1px solid currentColor;
+            color: inherit;
+            padding: 4px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-left: 8px;
+            transition: all 0.2s ease;
+        }
+        .retry-btn:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        .retry-btn.spinning i {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
         /* Main Content */
         .main-content {
             max-width: 1800px;
@@ -1851,6 +1872,9 @@
                 <div class="status-indicator" id="statusIndicator">
                     <span class="status-dot"></span>
                     <span id="statusText">Connected</span>
+                    <button id="retryBtn" class="retry-btn" style="display: none;" onclick="retryConnection()" title="Click to retry Ollama connection">
+                        <i class="fas fa-sync-alt"></i>
+                    </button>
                 </div>
                 <div class="ws-status disconnected" id="wsStatus" title="Connecting...">
                     <i class="fas fa-bolt"></i>
@@ -3222,38 +3246,80 @@
 
         // Health check
         async function checkHealth() {
+            const indicator = document.getElementById('statusIndicator');
+            const text = document.getElementById('statusText');
+            const retryBtn = document.getElementById('retryBtn');
+
             try {
                 const response = await fetch(`${API_URL}/health`);
                 const data = await response.json();
-                const indicator = document.getElementById('statusIndicator');
-                const text = document.getElementById('statusText');
+
                 if (data.status === 'healthy') {
                     indicator.style.borderColor = 'rgba(63, 185, 80, 0.3)';
                     indicator.style.background = 'rgba(63, 185, 80, 0.1)';
                     indicator.style.color = 'var(--accent-green)';
                     text.textContent = 'Connected';
+                    retryBtn.style.display = 'none';
                 } else if (data.status === 'degraded') {
                     // Degraded mode - server is connected but some features limited
                     indicator.style.borderColor = 'rgba(227, 179, 65, 0.3)';
                     indicator.style.background = 'rgba(227, 179, 65, 0.1)';
                     indicator.style.color = 'var(--accent-yellow)';
                     text.textContent = 'Degraded';
-                    text.title = 'Server connected but some features (like Ollama) are unavailable';
+                    text.title = 'Server connected but Ollama is unavailable. Click retry to reconnect.';
+                    retryBtn.style.display = 'inline-block';
                 } else {
                     throw new Error('Unhealthy');
                 }
             } catch (e) {
-                const indicator = document.getElementById('statusIndicator');
-                const text = document.getElementById('statusText');
                 indicator.style.borderColor = 'rgba(248, 81, 73, 0.3)';
                 indicator.style.background = 'rgba(248, 81, 73, 0.1)';
                 indicator.style.color = 'var(--accent-red)';
                 text.textContent = 'Disconnected';
+                retryBtn.style.display = 'inline-block';
             }
+        }
+
+        async function retryConnection() {
+            const retryBtn = document.getElementById('retryBtn');
+            const text = document.getElementById('statusText');
+
+            // Show spinning animation
+            retryBtn.classList.add('spinning');
+            text.textContent = 'Retrying...';
+
+            try {
+                const response = await fetch(`${API_URL}/health/retry`, { method: 'POST' });
+                const data = await response.json();
+
+                if (data.success) {
+                    showToast('Connection restored!', 'success');
+                } else {
+                    showToast(data.message || 'Still degraded', 'warning');
+                }
+            } catch (e) {
+                showToast('Retry failed: ' + e.message, 'error');
+            }
+
+            retryBtn.classList.remove('spinning');
+            // Refresh health status
+            await checkHealth();
         }
 
         setInterval(checkHealth, 10000);
         checkHealth();
+
+        // Auto-retry in background every 30 seconds when degraded
+        setInterval(async () => {
+            const text = document.getElementById('statusText');
+            if (text && (text.textContent === 'Degraded' || text.textContent === 'Disconnected')) {
+                // Silent background retry
+                try {
+                    await fetch(`${API_URL}/health/retry`, { method: 'POST' });
+                    await checkHealth();
+                } catch (e) { /* ignore */ }
+            }
+        }, 30000);
 
         // Memory Detail Modal
         function showMemoryDetail(index) {

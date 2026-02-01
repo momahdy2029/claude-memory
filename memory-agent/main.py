@@ -2168,6 +2168,57 @@ async def liveness_check():
     return {"alive": True, "timestamp": datetime.now().isoformat()}
 
 
+@app.post("/health/retry")
+async def retry_connection():
+    """Force retry connection to Ollama.
+
+    Clears health check cache and attempts to reconnect.
+    Used by dashboard to manually trigger recovery.
+    """
+    # Force health check with fresh attempt
+    health = await embeddings.check_health(force=True)
+
+    # If still unhealthy, try to ping Ollama directly
+    if not health.get("healthy"):
+        try:
+            import subprocess
+            import platform
+
+            # Try to check if Ollama is running
+            if platform.system() == "Windows":
+                # On Windows, try to start Ollama if not running
+                result = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq ollama.exe"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                ollama_running = "ollama.exe" in result.stdout
+
+                if not ollama_running:
+                    # Try to start Ollama
+                    subprocess.Popen(
+                        ["ollama", "serve"],
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                    # Wait a moment for startup
+                    import asyncio
+                    await asyncio.sleep(2)
+                    # Retry health check
+                    health = await embeddings.check_health(force=True)
+        except Exception as e:
+            logger.warning(f"Could not auto-start Ollama: {e}")
+
+    return {
+        "success": health.get("healthy", False),
+        "health": health,
+        "message": "Healthy" if health.get("healthy") else "Still degraded - check if Ollama is running",
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 @app.get("/api/index-stats")
 async def get_index_stats():
     """Get FAISS vector index statistics.
@@ -4029,7 +4080,7 @@ async def get_graph_node(memory_id: int):
     """
     try:
         # Get the memory itself
-        memory = await db.get_memory_by_id(memory_id)
+        memory = await db.get_memory(memory_id)
         if not memory:
             return {"success": False, "error": "Memory not found"}
 
