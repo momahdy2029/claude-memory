@@ -5475,6 +5475,171 @@ async def api_post_session_activity(request: Request):
         return {"success": False, "error": str(e)}
 
 
+# ============= Aggregated Grounding Context (v2) =============
+
+
+@app.post("/api/grounding-context")
+async def api_grounding_context(request: Request):
+    """Aggregated grounding endpoint for slim hooks.
+
+    Single call that runs all grounding queries in parallel and returns
+    a compact text summary (<150 tokens target).
+
+    Body:
+        session_id: str
+        project_path: str
+        user_input: str (optional - enables pattern hints)
+
+    Returns:
+        {"success": true, "context": "[MEM] goal: ... | anchors | sessions ..."}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    session_id = body.get("session_id", "")
+    project_path = body.get("project_path", "")
+    user_input = body.get("user_input", "")
+
+    parts = []
+    tasks_dict = {}
+
+    # 1. Context refresh (anchors, goal, contradictions)
+    if session_id:
+        async def _get_grounding():
+            try:
+                return await context_refresh(
+                    db=db,
+                    embeddings=embeddings,
+                    session_id=session_id,
+                    include_recent_events=3,
+                    include_state=True,
+                    include_checkpoint=False,
+                    include_relevant_memories=False,
+                    check_contradictions=True,
+                )
+            except Exception as e:
+                logger.debug(f"Grounding context_refresh failed: {e}")
+                return None
+        tasks_dict["grounding"] = _get_grounding()
+
+    # 2. Session heartbeat (parallel sessions + conflicts)
+    if session_id and project_path:
+        async def _get_sessions():
+            try:
+                awareness = get_session_awareness(db)
+                return await awareness.heartbeat(
+                    session_id=session_id,
+                    project_path=project_path,
+                )
+            except Exception as e:
+                logger.debug(f"Grounding heartbeat failed: {e}")
+                return None
+        tasks_dict["sessions"] = _get_sessions()
+
+    # 3. Pattern hints (only if user input provided)
+    if user_input and len(user_input) > 10:
+        async def _get_patterns():
+            try:
+                return await search_patterns(
+                    db=db,
+                    embeddings=embeddings,
+                    query=user_input[:300],
+                    limit=2,
+                    threshold=0.65,
+                )
+            except Exception as e:
+                logger.debug(f"Grounding pattern search failed: {e}")
+                return None
+        tasks_dict["patterns"] = _get_patterns()
+
+    # 4. Curator status (lightweight)
+    async def _get_curator_status():
+        try:
+            from services.curator import get_curator
+            curator = get_curator(db, embeddings)
+            return await curator.get_status()
+        except Exception as e:
+            logger.debug(f"Grounding curator status failed: {e}")
+            return None
+    tasks_dict["curator"] = _get_curator_status()
+
+    # Run all in parallel
+    if tasks_dict:
+        keys = list(tasks_dict.keys())
+        gathered = await asyncio.gather(
+            *[tasks_dict[k] for k in keys],
+            return_exceptions=True,
+        )
+        results = {}
+        for k, v in zip(keys, gathered):
+            results[k] = v if not isinstance(v, Exception) else None
+    else:
+        results = {}
+
+    # -- Build compact output --
+    # Goal
+    grounding = results.get("grounding")
+    if grounding and isinstance(grounding, dict) and grounding.get("success"):
+        g = grounding.get("grounding", {})
+        goal = g.get("current_goal")
+        if goal:
+            parts.append(f"goal: {goal[:80]}")
+
+        anchors = g.get("anchors", [])
+        if anchors:
+            parts.append(f"{len(anchors)} anchor{'s' if len(anchors) != 1 else ''}")
+
+        contradictions = g.get("contradictions", [])
+        if contradictions:
+            c_summaries = [c.get("content", "")[:40] for c in contradictions[:2]]
+            parts.append(f"CONFLICT: {'; '.join(c_summaries)}")
+
+    # Parallel sessions
+    sessions = results.get("sessions")
+    if sessions and isinstance(sessions, dict):
+        siblings = sessions.get("active_siblings", [])
+        conflicts = sessions.get("file_conflicts", [])
+        if siblings:
+            labels = [s.get("session_label", s.get("session_id", "")[:8]) for s in siblings]
+            parts.append(f"sessions: {', '.join(labels)}")
+        if conflicts:
+            conflict_files = []
+            for c in conflicts:
+                conflict_files.extend(c.get("conflicting_files", []))
+            if conflict_files:
+                parts.append(f"FILE CONFLICT: {', '.join(conflict_files[:3])}")
+
+    # Pattern hints
+    patterns = results.get("patterns")
+    if patterns and isinstance(patterns, dict):
+        p_list = patterns.get("patterns", [])
+        if p_list:
+            best = p_list[0]
+            sim = int(best.get("similarity", 0) * 100)
+            name = best.get("name", "")[:30]
+            parts.append(f"pattern({sim}%): {name}")
+
+    # Curator warnings
+    curator = results.get("curator")
+    if curator and isinstance(curator, dict):
+        orphans = curator.get("orphan_count", 0)
+        if orphans > 20:
+            parts.append(f"{orphans} orphans")
+
+    if parts:
+        compact = "[MEM] " + " | ".join(parts)
+    else:
+        compact = ""
+
+    return {
+        "success": True,
+        "context": compact,
+        "token_estimate": len(compact.split()),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

@@ -1,6 +1,6 @@
 {
   "name": "claude-memory-agent",
-  "version": "2.2.4",
+  "version": "3.0.0",
   "description": "Persistent semantic memory system for Claude Code sessions with anti-hallucination grounding",
   "keywords": [
     "claude",
