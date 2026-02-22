@@ -39,6 +39,7 @@ from services.database import (
 )
 from services.embeddings import EmbeddingService
 from services.auth import get_auth_service, AuthService
+from services.response_manager import fit_response
 
 # Original memory skills
 from skills.store import store_memory, store_project, store_pattern
@@ -107,17 +108,89 @@ from services.confidence import get_confidence_service
 # CLAUDE.md sync service
 from services.claude_md_sync import get_claude_md_sync
 
+# Cross-session awareness
+from services.session_awareness import get_session_awareness
+
 # Agent registry for dashboard
 from services.agent_registry import (
     AVAILABLE_AGENTS, AVAILABLE_MCPS, AVAILABLE_HOOKS,
-    AGENT_CATEGORIES, get_agents_by_category, get_agent_by_id
+    AGENT_CATEGORIES, get_agents_by_category, get_agent_by_id,
+    load_configured_hooks, load_configured_mcps
 )
 
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# Simple metrics tracker for search/store operations
+# ---------------------------------------------------------------------------
+class OperationMetrics:
+    """Lightweight in-memory metrics for search and store operations.
+
+    Tracks hit rates, result counts, and operation frequencies to answer:
+    "Are stored memories actually being found?"
+    """
+
+    def __init__(self):
+        self.search_total = 0
+        self.search_hits = 0  # searches that returned >= 1 result
+        self.search_empty = 0  # searches that returned 0 results
+        self.search_result_counts: List[int] = []  # rolling window of result counts
+        self.store_total = 0
+        self.store_merged = 0  # dedup merges
+        self.store_without_embedding = 0
+        self._max_history = 1000  # keep last 1000 result counts
+
+    def record_search(self, result_count: int):
+        self.search_total += 1
+        if result_count > 0:
+            self.search_hits += 1
+        else:
+            self.search_empty += 1
+        self.search_result_counts.append(result_count)
+        if len(self.search_result_counts) > self._max_history:
+            self.search_result_counts = self.search_result_counts[-self._max_history:]
+
+    def record_store(self, merged: bool = False, has_embedding: bool = True):
+        self.store_total += 1
+        if merged:
+            self.store_merged += 1
+        if not has_embedding:
+            self.store_without_embedding += 1
+
+    def to_dict(self) -> dict:
+        avg_results = (
+            sum(self.search_result_counts) / len(self.search_result_counts)
+            if self.search_result_counts else 0
+        )
+        hit_rate = (
+            self.search_hits / self.search_total
+            if self.search_total > 0 else 0
+        )
+        return {
+            "search": {
+                "total": self.search_total,
+                "hits": self.search_hits,
+                "empty": self.search_empty,
+                "hit_rate": round(hit_rate, 3),
+                "avg_result_count": round(avg_results, 1)
+            },
+            "store": {
+                "total": self.store_total,
+                "merged": self.store_merged,
+                "without_embedding": self.store_without_embedding
+            }
+        }
+
+
+metrics = OperationMetrics()
+
 # Initialize services
 db = DatabaseService()
-embeddings = EmbeddingService()
+from config import config as _cfg
+embeddings = EmbeddingService(
+    provider_type=_cfg.EMBEDDING_PROVIDER,
+    model=_cfg.EMBEDDING_MODEL,
+)
 
 # Retry queue (imported lazily to avoid circular imports)
 retry_queue = None
@@ -182,19 +255,104 @@ async def lifespan(app: FastAPI):
         run_curator_scheduler(db, embeddings, interval_hours=curator_interval)
     )
 
-    print(f"Memory Agent v2.0 started on port {os.getenv('PORT', 8102)}")
-    print(f"Retry queue initialized (depth: {retry_queue.get_queue_depth()})")
-    print(f"Curator scheduler started (interval: {curator_interval}h)")
+    # Initialize embedding pipeline with LRU cache
+    from services.embedding_pipeline import get_embedding_pipeline
+    pipeline = get_embedding_pipeline(embeddings, db)
 
-    # Show auth status
+    # Start embedding pre-computation background loop
+    from config import config as app_config
+
+    async def precompute_loop():
+        """Background: generate embeddings for memories missing them."""
+        interval = app_config.EMBEDDING_PRECOMPUTE_INTERVAL
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                result = await pipeline.precompute_missing_embeddings()
+                if result.get('generated', 0) > 0:
+                    logger.info(f"Pre-computed {result['generated']} embeddings")
+            except Exception as e:
+                logger.debug(f"Precompute loop error: {e}")
+
+    precompute_task = asyncio.create_task(precompute_loop())
+
+    # Start consolidation background loop
+    async def consolidation_loop():
+        """Background: consolidate similar warm-tier memories."""
+        interval_hours = app_config.CONSOLIDATION_INTERVAL_HOURS
+        while True:
+            await asyncio.sleep(interval_hours * 3600)
+            try:
+                from services.consolidation import ConsolidationService
+                consolidator = ConsolidationService(db, embeddings)
+                result = await consolidator.run_consolidation()
+                if result.get('consolidated', 0) > 0:
+                    logger.info(
+                        f"Consolidated {result['consolidated']} groups "
+                        f"({result['memories_archived']} memories archived)"
+                    )
+            except Exception as e:
+                logger.debug(f"Consolidation loop error: {e}")
+
+    consolidation_task = asyncio.create_task(consolidation_loop())
+
+    # Start cross-session stale cleanup loop
+    async def session_cleanup_loop():
+        """Background: clean up stale/expired sessions."""
+        interval = app_config.SESSION_CLEANUP_INTERVAL_SECONDS
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                awareness = get_session_awareness(db)
+                result = await awareness.cleanup_stale(
+                    idle_minutes=app_config.SESSION_IDLE_THRESHOLD_MINUTES,
+                    completed_minutes=app_config.SESSION_COMPLETED_THRESHOLD_MINUTES,
+                )
+                total = sum(result.values())
+                if total > 0:
+                    logger.info(f"Session cleanup: {result}")
+            except Exception as e:
+                logger.debug(f"Session cleanup loop error: {e}")
+
+    session_cleanup_task = asyncio.create_task(session_cleanup_loop())
+
+    # Collect DB stats for splash
     auth_stats = auth_service.get_stats()
-    if auth_stats["enabled"]:
-        print(f"Authentication: ENABLED ({auth_stats['active_keys']} active keys)")
-        print(f"  Key file: {auth_stats['key_file']}")
-        if auth_stats['active_keys'] == 1:
-            print("  Note: Default key generated. Check key file for the key hash.")
-    else:
-        print("Authentication: DISABLED (set AUTH_ENABLED=true to enable)")
+    db_stats = None
+    try:
+        db_stats = await db.get_stats()
+    except Exception:
+        pass
+
+    # Rich terminal splash screen
+    try:
+        from services.terminal_ui import print_splash, setup_rich_logging
+
+        print_splash(
+            version="2.4.0",
+            port=int(os.getenv("PORT", 8102)),
+            auth_enabled=auth_stats.get("enabled", False),
+            auth_keys=auth_stats.get("active_keys", 0),
+            queue_depth=retry_queue.get_queue_depth(),
+            curator_interval=curator_interval,
+            embedding_cache_size=app_config.EMBEDDING_CACHE_SIZE,
+            precompute_interval=app_config.EMBEDDING_PRECOMPUTE_INTERVAL,
+            consolidation_threshold=app_config.CONSOLIDATION_THRESHOLD,
+            consolidation_interval=app_config.CONSOLIDATION_INTERVAL_HOURS,
+            db_stats=db_stats,
+        )
+
+        # Install rich logging handler for prettier output
+        rich_handler = setup_rich_logging(app_config.LOG_LEVEL)
+        logging.root.handlers = [rich_handler]
+
+    except ImportError:
+        # Fallback to plain output if rich unavailable
+        print(f"Memory Agent v2.4.0 (CLaRa) started on port {os.getenv('PORT', 8102)}")
+        if auth_stats.get("enabled"):
+            print(f"Authentication: ENABLED ({auth_stats.get('active_keys', 0)} active keys)")
+        else:
+            print("Authentication: DISABLED")
 
     yield
 
@@ -202,14 +360,14 @@ async def lifespan(app: FastAPI):
     retry_queue.stop_processing()
     queue_task.cancel()
     curator_task.cancel()
-    try:
-        await queue_task
-    except asyncio.CancelledError:
-        pass
-    try:
-        await curator_task
-    except asyncio.CancelledError:
-        pass
+    precompute_task.cancel()
+    consolidation_task.cancel()
+    session_cleanup_task.cancel()
+    for task in [queue_task, curator_task, precompute_task, consolidation_task, session_cleanup_task]:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
     retry_queue.close()
     await db.disconnect()
 
@@ -217,7 +375,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Claude Memory Agent",
     description="Persistent semantic memory for Claude Code sessions with cross-project support",
-    version="2.0.0",
+    version="2.4.0",
     lifespan=lifespan
 )
 
@@ -358,7 +516,7 @@ async def handle_task_send(request: A2ARequest) -> JSONResponse:
             "result": {
                 "id": task_id,
                 "status": {"state": "completed"},
-                "artifacts": [{"parts": [{"type": "text", "text": json.dumps(result, indent=2)}]}]
+                "artifacts": [{"parts": [{"type": "text", "text": fit_response(result)}]}]
             }
         })
 
@@ -394,7 +552,7 @@ async def handle_task_get(request: A2ARequest) -> JSONResponse:
         "result": {
             "id": task_id,
             "status": {"state": task["status"]},
-            "artifacts": [{"parts": [{"type": "text", "text": json.dumps(task.get("result", {}), indent=2)}]}] if task.get("result") else []
+            "artifacts": [{"parts": [{"type": "text", "text": fit_response(task.get("result", {}))}]}] if task.get("result") else []
         }
     })
 
@@ -411,974 +569,1383 @@ async def handle_task_cancel(request: A2ARequest) -> JSONResponse:
     })
 
 
+# ============================================================
+# SKILL HANDLER FUNCTIONS
+# ============================================================
+# Each handler receives (query, params, session_id) and returns a dict.
+# Grouped by category for maintainability.
+# ============================================================
+
+
+# --- Core Memory Skills ---
+
+async def _handle_store_memory(query, params, session_id):
+    result = await store_memory(
+        db=db,
+        embeddings=embeddings,
+        content=params.get("content", query),
+        memory_type=params.get("type", "chunk"),
+        metadata=params.get("metadata"),
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path"),
+        project_name=params.get("project_name"),
+        project_type=params.get("project_type"),
+        tech_stack=params.get("tech_stack"),
+        agent_type=params.get("agent_type"),
+        skill_used=params.get("skill_used"),
+        tools_used=params.get("tools_used"),
+        outcome=params.get("outcome"),
+        success=params.get("success"),
+        tags=params.get("tags"),
+        importance=params.get("importance", 5),
+        confidence=params.get("confidence", 0.5),
+        outcome_status=params.get("outcome_status", "pending"),
+        fixed=params.get("fixed"),
+        did_not_fix=params.get("did_not_fix"),
+        caused=params.get("caused")
+    )
+    metrics.record_store(
+        merged=result.get("action") == "merged",
+        has_embedding=result.get("has_embedding", True)
+    )
+    try:
+        await broadcast_event(
+            EventTypes.MEMORY_STORED,
+            {"memory_id": result.get("memory_id"), "type": params.get("type", "chunk")},
+            params.get("project_path")
+        )
+    except Exception as e:
+        logger.debug(f"Broadcast error: {e}")
+    return result
+
+
+async def _handle_store_project(query, params, session_id):
+    return await store_project(
+        db=db,
+        path=params.get("path"),
+        name=params.get("name"),
+        project_type=params.get("project_type"),
+        tech_stack=params.get("tech_stack"),
+        conventions=params.get("conventions"),
+        preferences=params.get("preferences")
+    )
+
+
+async def _handle_store_pattern(query, params, session_id):
+    return await store_pattern(
+        db=db,
+        embeddings=embeddings,
+        name=params.get("name"),
+        solution=params.get("solution"),
+        problem_type=params.get("problem_type"),
+        tech_context=params.get("tech_context"),
+        metadata=params.get("metadata")
+    )
+
+
+async def _handle_retrieve_memory(query, params, session_id):
+    return await retrieve_memory(
+        db=db,
+        memory_id=params.get("memory_id"),
+        memory_type=params.get("type"),
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 10)
+    )
+
+
+async def _handle_semantic_search(query, params, session_id):
+    result = await semantic_search(
+        db=db,
+        embeddings=embeddings,
+        query=params.get("query", query),
+        limit=params.get("limit", 10),
+        memory_type=params.get("type"),
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path"),
+        agent_type=params.get("agent_type"),
+        success_only=params.get("success_only", False),
+        threshold=params.get("threshold", 0.5),
+        include_failed=params.get("include_failed", False),
+        include_superseded=params.get("include_superseded", False),
+        include_unreliable=params.get("include_unreliable", False),
+        outcome_status=params.get("outcome_status"),
+        include_graph=params.get("include_graph", True),
+        temperature=params.get("temperature")
+    )
+    metrics.record_search(result.get("count", 0))
+    return result
+
+
+async def _handle_search_patterns(query, params, session_id):
+    result = await search_patterns(
+        db=db,
+        embeddings=embeddings,
+        query=params.get("query", query),
+        limit=params.get("limit", 5),
+        problem_type=params.get("problem_type"),
+        threshold=params.get("threshold", 0.5)
+    )
+    metrics.record_search(result.get("count", 0))
+    return result
+
+
+async def _handle_get_project_context(query, params, session_id):
+    return await get_project_context(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        query=params.get("query"),
+        limit=params.get("limit", 10)
+    )
+
+
+# --- Session Skills ---
+
+async def _handle_summarize_session(query, params, session_id):
+    return await summarize_session(
+        db=db,
+        embeddings=embeddings,
+        session_id=session_id or params.get("session_id", str(uuid.uuid4())),
+        summary=params.get("summary", query),
+        key_decisions=params.get("key_decisions"),
+        code_patterns=params.get("code_patterns"),
+        metadata=params.get("metadata"),
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_auto_summarize_session(query, params, session_id):
+    return await auto_summarize_session(
+        db=db,
+        embeddings=embeddings,
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_get_session_handoff(query, params, session_id):
+    return await get_session_handoff(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        include_last_n_sessions=params.get("include_last_n_sessions", 3)
+    )
+
+
+async def _handle_create_diary_entry(query, params, session_id):
+    return await create_diary_entry(
+        db=db,
+        embeddings=embeddings,
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path"),
+        user_notes=params.get("user_notes")
+    )
+
+
+async def _handle_check_session_inactivity(query, params, session_id):
+    return await check_session_inactivity(
+        db=db,
+        session_id=session_id or params.get("session_id"),
+        inactivity_threshold_hours=params.get("inactivity_threshold_hours", 4.0)
+    )
+
+
+async def _handle_get_stats(query, params, session_id):
+    return await db.get_stats()
+
+
+# --- Timeline Skills ---
+
+async def _handle_timeline_log(query, params, session_id):
+    result = await timeline_log(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
+        event_type=params.get("event_type", "observation"),
+        summary=params.get("summary", query),
+        details=params.get("details"),
+        project_path=params.get("project_path"),
+        parent_event_id=params.get("parent_event_id"),
+        root_event_id=params.get("root_event_id"),
+        entities=params.get("entities"),
+        status=params.get("status", "completed"),
+        outcome=params.get("outcome"),
+        confidence=params.get("confidence"),
+        is_anchor=params.get("is_anchor", False)
+    )
+    await broadcast_event(
+        EventTypes.TIMELINE_LOGGED,
+        {"event_id": result.get("event_id"), "event_type": params.get("event_type", "observation")},
+        params.get("project_path")
+    )
+    return result
+
+
+async def _handle_timeline_log_batch(query, params, session_id):
+    result = await timeline_log_batch(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
+        events=params.get("events", []),
+        project_path=params.get("project_path"),
+        parent_event_id=params.get("parent_event_id"),
+        root_event_id=params.get("root_event_id")
+    )
+    if result.get("events_logged", 0) > 0:
+        await broadcast_event(
+            EventTypes.TIMELINE_LOGGED,
+            {
+                "event_ids": result.get("event_ids", []),
+                "batch_size": result.get("events_logged", 0),
+                "event_types": result.get("event_types", {})
+            },
+            params.get("project_path")
+        )
+    return result
+
+
+async def _handle_timeline_get(query, params, session_id):
+    return await timeline_get(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        limit=params.get("limit", 20),
+        event_type=params.get("event_type"),
+        since_event_id=params.get("since_event_id"),
+        anchors_only=params.get("anchors_only", False),
+        include_state=params.get("include_state", True),
+        include_checkpoint=params.get("include_checkpoint", True)
+    )
+
+
+async def _handle_timeline_search(query, params, session_id):
+    return await timeline_search(
+        db=db,
+        embeddings=embeddings,
+        query=params.get("query", query),
+        session_id=params.get("session_id") or session_id,
+        limit=params.get("limit", 10),
+        threshold=params.get("threshold", 0.5)
+    )
+
+
+async def _handle_timeline_auto_detect(query, params, session_id):
+    return await timeline_auto_detect(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
+        response_text=params.get("response_text", query),
+        project_path=params.get("project_path"),
+        parent_event_id=params.get("parent_event_id")
+    )
+
+
+async def _handle_timeline_chain(query, params, session_id):
+    return await timeline_chain(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        root_event_id=params.get("root_event_id"),
+        include_details=params.get("include_details", False)
+    )
+
+
+# --- State Skills ---
+
+async def _handle_state_get(query, params, session_id):
+    return await state_get(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_state_update(query, params, session_id):
+    return await state_update(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        current_goal=params.get("current_goal"),
+        pending_questions=params.get("pending_questions"),
+        add_question=params.get("add_question"),
+        remove_question=params.get("remove_question"),
+        register_entity=params.get("register_entity"),
+        entity_registry=params.get("entity_registry"),
+        add_decision=params.get("add_decision"),
+        decisions_summary=params.get("decisions_summary")
+    )
+
+
+async def _handle_state_init_session(query, params, session_id):
+    return await state_init_session(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path")
+    )
+
+
+# --- Checkpoint Skills ---
+
+async def _handle_checkpoint_create(query, params, session_id):
+    return await checkpoint_create(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id,
+        summary=params.get("summary"),
+        key_facts=params.get("key_facts"),
+        include_state=params.get("include_state", True)
+    )
+
+
+async def _handle_checkpoint_load(query, params, session_id):
+    return await checkpoint_load(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        checkpoint_id=params.get("checkpoint_id"),
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_checkpoint_list(query, params, session_id):
+    return await checkpoint_list(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        limit=params.get("limit", 10)
+    )
+
+
+# --- Grounding Skills (Anti-Hallucination) ---
+
+async def _handle_context_refresh(query, params, session_id):
+    return await context_refresh(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id,
+        query=params.get("query", query) if query else None,
+        include_recent_events=params.get("include_recent_events", 10),
+        include_state=params.get("include_state", True),
+        include_checkpoint=params.get("include_checkpoint", True),
+        include_relevant_memories=params.get("include_relevant_memories", True),
+        check_contradictions=params.get("check_contradictions", True)
+    )
+
+
+async def _handle_check_contradictions(query, params, session_id):
+    return await check_contradictions(
+        db=db,
+        embeddings=embeddings,
+        statement=params.get("statement", query),
+        session_id=params.get("session_id") or session_id,
+        scope=params.get("scope", "session")
+    )
+
+
+async def _handle_verify_entity(query, params, session_id):
+    return await verify_entity(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        entity_key=params.get("entity_key"),
+        entity_type=params.get("entity_type")
+    )
+
+
+async def _handle_mark_anchor(query, params, session_id):
+    result = await mark_anchor(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id,
+        fact=params.get("fact", query),
+        details=params.get("details"),
+        project_path=params.get("project_path"),
+        force=params.get("force", False)
+    )
+    event_type = EventTypes.ANCHOR_CONFLICT if result.get("conflict_detected") else EventTypes.ANCHOR_MARKED
+    await broadcast_event(
+        event_type,
+        {"anchor_id": result.get("anchor_id"), "fact": params.get("fact", query)[:100]},
+        params.get("project_path")
+    )
+    return result
+
+
+async def _handle_get_unresolved_conflicts(query, params, session_id):
+    return await get_unresolved_conflicts(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 20)
+    )
+
+
+async def _handle_resolve_conflict(query, params, session_id):
+    return await resolve_conflict(
+        db=db,
+        embeddings=embeddings,
+        conflict_id=params.get("conflict_id"),
+        resolution=params.get("resolution"),
+        keep_anchor_id=params.get("keep_anchor_id"),
+        resolved_by=params.get("resolved_by", "user")
+    )
+
+
+async def _handle_get_anchor_history(query, params, session_id):
+    return await get_anchor_history(
+        db=db,
+        anchor_id=params.get("anchor_id"),
+        session_id=params.get("session_id") or session_id,
+        limit=params.get("limit", 50)
+    )
+
+
+async def _handle_auto_resolve_conflicts(query, params, session_id):
+    return await auto_resolve_conflicts(
+        db=db,
+        embeddings=embeddings,
+        session_id=params.get("session_id") or session_id
+    )
+
+
+# --- Self-Correcting Confidence Skills ---
+
+async def _handle_memory_worked(query, params, session_id):
+    from skills.confidence_tracker import report_solution_outcome
+    result = await report_solution_outcome(
+        db=db,
+        memory_id=params.get("memory_id"),
+        worked=True,
+        context=params.get("context")
+    )
+    if result.get("success"):
+        await broadcast_event(
+            EventTypes.MEMORY_UPDATED,
+            {
+                "memory_id": params.get("memory_id"),
+                "action": "worked",
+                "new_confidence": result.get("new_confidence"),
+                "reliability": result.get("reliability")
+            }
+        )
+    return result
+
+
+async def _handle_memory_failed(query, params, session_id):
+    from skills.confidence_tracker import report_solution_outcome
+    result = await report_solution_outcome(
+        db=db,
+        memory_id=params.get("memory_id"),
+        worked=False,
+        context=params.get("context")
+    )
+    if result.get("success"):
+        await broadcast_event(
+            EventTypes.MEMORY_UPDATED,
+            {
+                "memory_id": params.get("memory_id"),
+                "action": "failed",
+                "new_confidence": result.get("new_confidence"),
+                "reliability": result.get("reliability"),
+                "is_unreliable": result.get("is_unreliable")
+            }
+        )
+    return result
+
+
+async def _handle_get_reliability_stats(query, params, session_id):
+    from skills.confidence_tracker import get_reliability_stats as _get_reliability_stats
+    return await _get_reliability_stats(
+        db=db,
+        memory_id=params.get("memory_id")
+    )
+
+
+async def _handle_get_unreliable_memories(query, params, session_id):
+    from skills.confidence_tracker import get_unreliable_memories as _get_unreliable_memories
+    return await _get_unreliable_memories(
+        db=db,
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 50)
+    )
+
+
+async def _handle_reset_memory_reliability(query, params, session_id):
+    from skills.confidence_tracker import reset_memory_reliability as _reset_memory_reliability
+    return await _reset_memory_reliability(
+        db=db,
+        memory_id=params.get("memory_id"),
+        new_confidence=params.get("confidence", 0.5)
+    )
+
+
+# --- CLAUDE.MD Management Skills ---
+
+async def _handle_claude_md_read(query, params, session_id):
+    return await claude_md_read(
+        section=params.get("section")
+    )
+
+
+async def _handle_claude_md_add_section(query, params, session_id):
+    return await claude_md_add_section(
+        section_name=params.get("section_name"),
+        content=params.get("content", query),
+        position=params.get("position", "end")
+    )
+
+
+async def _handle_claude_md_update_section(query, params, session_id):
+    return await claude_md_update_section(
+        section_name=params.get("section_name"),
+        content=params.get("content", query),
+        mode=params.get("mode", "replace")
+    )
+
+
+async def _handle_claude_md_add_instruction(query, params, session_id):
+    return await claude_md_add_instruction(
+        section_name=params.get("section_name"),
+        instruction=params.get("instruction", query),
+        bullet_style=params.get("bullet_style", "-")
+    )
+
+
+async def _handle_claude_md_list_sections(query, params, session_id):
+    return await claude_md_list_sections()
+
+
+async def _handle_claude_md_suggest(query, params, session_id):
+    return await claude_md_suggest_from_session(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        min_importance=params.get("min_importance", 7)
+    )
+
+
+# --- Verification Skills ---
+
+async def _handle_best_of_n_verify(query, params, session_id):
+    return await best_of_n_verify(
+        query=params.get("query", query),
+        n=params.get("n", 3),
+        context=params.get("context"),
+        threshold=params.get("threshold", 0.7)
+    )
+
+
+async def _handle_extract_quotes(query, params, session_id):
+    return await extract_quotes(
+        document=params.get("document", ""),
+        query=params.get("query", query),
+        max_quotes=params.get("max_quotes", 5),
+        min_length=params.get("min_length", 20)
+    )
+
+
+async def _handle_require_grounding(query, params, session_id):
+    return await require_grounding(
+        db=db,
+        session_id=params.get("session_id") or session_id,
+        statement=params.get("statement", query),
+        source_type=params.get("source_type", "any")
+    )
+
+
+# --- Cross-Session Learning Skills ---
+
+async def _handle_run_aggregation(query, params, session_id):
+    return await run_aggregation(
+        db=db,
+        embeddings=embeddings,
+        days_back=params.get("days_back", 30)
+    )
+
+
+async def _handle_get_insights(query, params, session_id):
+    return await get_insights(
+        db=db,
+        embeddings=embeddings,
+        insight_type=params.get("insight_type"),
+        project_path=params.get("project_path"),
+        min_confidence=params.get("min_confidence", 0.5),
+        limit=params.get("limit", 10)
+    )
+
+
+async def _handle_suggest_improvements(query, params, session_id):
+    return await suggest_improvements(
+        db=db,
+        embeddings=embeddings,
+        min_confidence=params.get("min_confidence", 0.7)
+    )
+
+
+async def _handle_record_insight_feedback(query, params, session_id):
+    return await record_insight_feedback(
+        db=db,
+        embeddings=embeddings,
+        insight_id=params.get("insight_id"),
+        helpful=params.get("helpful", True),
+        session_id=session_id or params.get("session_id"),
+        comment=params.get("comment")
+    )
+
+
+async def _handle_mark_insight_applied(query, params, session_id):
+    return await mark_insight_applied(
+        db=db,
+        embeddings=embeddings,
+        insight_id=params.get("insight_id")
+    )
+
+
+async def _handle_get_project_insights(query, params, session_id):
+    return await get_project_insights(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        include_global=params.get("include_global", True),
+        limit=params.get("limit", 10)
+    )
+
+
+# --- Memory Cleanup Skills ---
+
+async def _handle_memory_cleanup(query, params, session_id):
+    result = await memory_cleanup(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        dry_run=params.get("dry_run", True)
+    )
+    if not params.get("dry_run", True):
+        await broadcast_event(
+            EventTypes.CLEANUP_COMPLETED,
+            {"archived": result.get("total_archived", 0), "deleted": result.get("total_deleted", 0)},
+            params.get("project_path")
+        )
+    return result
+
+
+async def _handle_get_archived_memories(query, params, session_id):
+    return await get_archived_memories(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        reason=params.get("reason"),
+        limit=params.get("limit", 50)
+    )
+
+
+async def _handle_restore_memory(query, params, session_id):
+    return await restore_memory(
+        db=db,
+        embeddings=embeddings,
+        archive_id=params.get("archive_id")
+    )
+
+
+async def _handle_get_cleanup_config(query, params, session_id):
+    return await get_cleanup_config(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_set_cleanup_config(query, params, session_id):
+    return await set_cleanup_config(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        retention_days=params.get("retention_days"),
+        min_relevance_score=params.get("min_relevance_score"),
+        keep_high_importance=params.get("keep_high_importance"),
+        importance_threshold=params.get("importance_threshold"),
+        dedup_enabled=params.get("dedup_enabled"),
+        dedup_threshold=params.get("dedup_threshold"),
+        archive_before_delete=params.get("archive_before_delete"),
+        auto_cleanup_enabled=params.get("auto_cleanup_enabled")
+    )
+
+
+async def _handle_get_cleanup_stats(query, params, session_id):
+    return await get_cleanup_stats(db=db, embeddings=embeddings)
+
+
+async def _handle_purge_expired_archives(query, params, session_id):
+    return await purge_expired_archives(db=db, embeddings=embeddings)
+
+
+# --- Admin Skills (Embedding Model Management) ---
+
+async def _handle_get_embedding_status(query, params, session_id):
+    return await get_embedding_status(db=db, embeddings=embeddings)
+
+
+async def _handle_switch_embedding_model(query, params, session_id):
+    return await switch_embedding_model(
+        db=db,
+        embeddings=embeddings,
+        model=params.get("model", "nomic-embed-text"),
+        reindex_existing=params.get("reindex_existing", False)
+    )
+
+
+async def _handle_reindex_memories(query, params, session_id):
+    return await reindex_memories(
+        db=db,
+        embeddings=embeddings,
+        model=params.get("model"),
+        project_path=params.get("project_path"),
+        batch_size=params.get("batch_size", 10),
+        dry_run=params.get("dry_run", False)
+    )
+
+
+async def _handle_get_reindex_progress(query, params, session_id):
+    return await get_reindex_progress(db=db, embeddings=embeddings)
+
+
+async def _handle_cancel_reindex(query, params, session_id):
+    return await cancel_reindex(db=db, embeddings=embeddings)
+
+
+async def _handle_get_model_info(query, params, session_id):
+    return await get_model_info(
+        db=db,
+        embeddings=embeddings,
+        model=params.get("model")
+    )
+
+
+async def _handle_get_system_stats(query, params, session_id):
+    return await get_system_stats(db=db, embeddings=embeddings)
+
+
+# --- MoltBot-Inspired Skills (Human-Readable Transparency) ---
+
+async def _handle_daily_log_append(query, params, session_id):
+    from services.daily_log import append_entry
+    return await append_entry(
+        project_path=params.get("project_path"),
+        content=params.get("content", query),
+        entry_type=params.get("entry_type", "note"),
+        session_id=session_id or params.get("session_id")
+    )
+
+
+async def _handle_daily_log_append_session(query, params, session_id):
+    from services.daily_log import append_session_summary
+    return await append_session_summary(
+        project_path=params.get("project_path"),
+        session_id=session_id or params.get("session_id"),
+        decisions=params.get("decisions"),
+        accomplishments=params.get("accomplishments"),
+        notes=params.get("notes"),
+        errors_solved=params.get("errors_solved")
+    )
+
+
+async def _handle_daily_log_read(query, params, session_id):
+    from services.daily_log import load_recent_logs
+    return await load_recent_logs(
+        project_path=params.get("project_path"),
+        days=params.get("days", 2),
+        max_chars=params.get("max_chars", 8000)
+    )
+
+
+async def _handle_daily_log_highlights(query, params, session_id):
+    from services.daily_log import get_today_highlights
+    return await get_today_highlights(
+        project_path=params.get("project_path"),
+        max_entries=params.get("max_entries", 10)
+    )
+
+
+async def _handle_daily_log_list(query, params, session_id):
+    from services.daily_log import list_logs
+    return await list_logs(
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 30)
+    )
+
+
+async def _handle_sync_memory_md(query, params, session_id):
+    from services.memory_md_sync import sync_to_memory_md
+    return await sync_to_memory_md(
+        db=db,
+        project_path=params.get("project_path"),
+        min_importance=params.get("min_importance", 7),
+        min_pattern_success=params.get("min_pattern_success", 3)
+    )
+
+
+async def _handle_read_memory_md(query, params, session_id):
+    from services.memory_md_sync import read_memory_md
+    return await read_memory_md(
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_get_memory_md_summary(query, params, session_id):
+    from services.memory_md_sync import get_memory_md_summary
+    return await get_memory_md_summary(
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_add_memory_md_fact(query, params, session_id):
+    from services.memory_md_sync import add_fact
+    return await add_fact(
+        project_path=params.get("project_path"),
+        fact=params.get("fact", query),
+        section=params.get("section", "anchors")
+    )
+
+
+async def _handle_check_flush_needed(query, params, session_id):
+    from services.compaction_flush import check_flush_needed as _check_flush_needed
+    return await _check_flush_needed(
+        db=db,
+        session_id=session_id or params.get("session_id"),
+        event_threshold=params.get("event_threshold", 50),
+        time_threshold_minutes=params.get("time_threshold_minutes", 30)
+    )
+
+
+async def _handle_pre_compaction_flush(query, params, session_id):
+    from services.compaction_flush import execute_flush
+    return await execute_flush(
+        db=db,
+        project_path=params.get("project_path"),
+        session_id=session_id or params.get("session_id")
+    )
+
+
+async def _handle_list_flushes(query, params, session_id):
+    from services.compaction_flush import list_flushes as _list_flushes
+    return await _list_flushes(
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 20)
+    )
+
+
+async def _handle_read_flush(query, params, session_id):
+    from services.compaction_flush import read_flush as _read_flush
+    return await _read_flush(
+        project_path=params.get("project_path"),
+        filename=params.get("filename")
+    )
+
+
+# --- Outcome Spectrum Skills ---
+
+async def _handle_update_memory_outcome(query, params, session_id):
+    result = await db.update_memory_outcome(
+        memory_id=params.get("memory_id"),
+        outcome_status=params.get("outcome_status"),
+        fixed=params.get("fixed"),
+        did_not_fix=params.get("did_not_fix"),
+        caused=params.get("caused"),
+        superseded_by=params.get("superseded_by")
+    )
+    if result.get("success"):
+        await broadcast_event(
+            EventTypes.MEMORY_UPDATED,
+            {
+                "memory_id": params.get("memory_id"),
+                "outcome_status": params.get("outcome_status"),
+                "action": "outcome_updated"
+            }
+        )
+    return result
+
+
+async def _handle_supersede_memory(query, params, session_id):
+    result = await db.supersede_memory(
+        old_memory_id=params.get("old_memory_id"),
+        new_memory_id=params.get("new_memory_id"),
+        reason=params.get("reason")
+    )
+    if result.get("success"):
+        await broadcast_event(
+            EventTypes.MEMORY_UPDATED,
+            {
+                "old_memory_id": params.get("old_memory_id"),
+                "new_memory_id": params.get("new_memory_id"),
+                "action": "superseded"
+            }
+        )
+    return result
+
+
+async def _handle_get_superseding_memory(query, params, session_id):
+    superseding = await db.get_superseding_memory(
+        memory_id=params.get("memory_id")
+    )
+    return {
+        "success": True,
+        "superseded": superseding is not None,
+        "superseding_memory": superseding
+    }
+
+
+# --- Curator Agent Skills ---
+
+async def _handle_curator_explore(query, params, session_id):
+    from skills.curator import curator_explore as _curator_explore
+    return await _curator_explore(
+        db=db,
+        embeddings=embeddings,
+        start_node_id=params.get("start_node_id"),
+        max_depth=params.get("max_depth", 3),
+        mode=params.get("mode", "bfs"),
+        relationship_filter=params.get("relationship_filter")
+    )
+
+
+async def _handle_curator_find_duplicates(query, params, session_id):
+    from skills.curator import curator_find_duplicates as _curator_find_duplicates
+    return await _curator_find_duplicates(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        similarity_threshold=params.get("similarity_threshold", 0.92),
+        limit=params.get("limit", 50)
+    )
+
+
+async def _handle_curator_suggest_links(query, params, session_id):
+    from skills.curator import curator_suggest_links as _curator_suggest_links
+    return await _curator_suggest_links(
+        db=db,
+        embeddings=embeddings,
+        memory_id=params.get("memory_id"),
+        project_path=params.get("project_path"),
+        similarity_threshold=params.get("similarity_threshold", 0.7),
+        limit=params.get("limit", 20)
+    )
+
+
+async def _handle_curator_merge(query, params, session_id):
+    from skills.curator import curator_merge as _curator_merge
+    return await _curator_merge(
+        db=db,
+        embeddings=embeddings,
+        keep_id=params.get("keep_id"),
+        remove_ids=params.get("remove_ids", []),
+        merge_content=params.get("merge_content", False)
+    )
+
+
+async def _handle_curator_get_summary(query, params, session_id):
+    from skills.curator import curator_get_summary as _curator_get_summary
+    return await _curator_get_summary(
+        db=db,
+        embeddings=embeddings,
+        query=params.get("query", query),
+        project_path=params.get("project_path"),
+        max_memories=params.get("max_memories", 10),
+        include_graph=params.get("include_graph", True)
+    )
+
+
+async def _handle_curator_run_maintenance(query, params, session_id):
+    from skills.curator import curator_run_maintenance as _curator_run_maintenance
+    return await _curator_run_maintenance(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        tasks=params.get("tasks")
+    )
+
+
+async def _handle_curator_get_report(query, params, session_id):
+    from skills.curator import curator_get_report as _curator_get_report
+    return await _curator_get_report(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path")
+    )
+
+
+async def _handle_curator_get_status(query, params, session_id):
+    from skills.curator import curator_get_status as _curator_get_status
+    return await _curator_get_status(
+        db=db,
+        embeddings=embeddings
+    )
+
+
+async def _handle_curator_score_quality(query, params, session_id):
+    from skills.curator import curator_score_quality as _curator_score_quality
+    return await _curator_score_quality(
+        db=db,
+        embeddings=embeddings,
+        memory_id=params.get("memory_id"),
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 100)
+    )
+
+
+async def _handle_curator_find_orphans(query, params, session_id):
+    from skills.curator import curator_find_orphans as _curator_find_orphans
+    return await _curator_find_orphans(
+        db=db,
+        embeddings=embeddings,
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 50)
+    )
+
+
+# --- Memory Decay Skills ---
+
+async def _handle_decay_maintenance(query, params, session_id):
+    from services.memory_decay import MemoryDecayService
+    from config import config
+    decay_service = MemoryDecayService(
+        db=db,
+        archive_threshold=config.DECAY_ARCHIVE_THRESHOLD
+    )
+    return await decay_service.apply_decay()
+
+
+async def _handle_decay_stats(query, params, session_id):
+    from services.memory_decay import MemoryDecayService
+    from config import config
+    decay_service = MemoryDecayService(
+        db=db,
+        archive_threshold=config.DECAY_ARCHIVE_THRESHOLD
+    )
+    return await decay_service.get_decay_stats()
+
+
+async def _handle_decay_boost(query, params, session_id):
+    from services.memory_decay import MemoryDecayService
+    from config import config
+    decay_service = MemoryDecayService(
+        db=db,
+        archive_threshold=config.DECAY_ARCHIVE_THRESHOLD
+    )
+    memory_id = params.get("memory_id")
+    if not memory_id:
+        return {"error": "memory_id is required"}
+    return await decay_service.boost_on_access(int(memory_id))
+
+
+# --- Tier 1 Auto-Generation Skill ---
+
+async def _handle_generate_tier1(query, params, session_id):
+    from services.claude_md_sync import get_claude_md_sync
+    sync_service = get_claude_md_sync(db, embeddings)
+    return await sync_service.write_tier1_to_claude_md(
+        project_path=params.get("project_path"),
+        dry_run=params.get("dry_run", False)
+    )
+
+
+# --- Session Review Skills ---
+
+async def _handle_get_session_memories(query, params, session_id):
+    return await get_session_memories(
+        db=db,
+        session_id=session_id or params.get("session_id"),
+        include_patterns=params.get("include_patterns", False),
+        limit=params.get("limit", 100)
+    )
+
+
+async def _handle_review_session_memories(query, params, session_id):
+    return await review_session_memories(
+        db=db,
+        session_id=session_id or params.get("session_id"),
+        reviews=params.get("reviews", [])
+    )
+
+
+async def _handle_suggest_session_reviews(query, params, session_id):
+    return await suggest_session_reviews(
+        db=db,
+        embeddings=embeddings,
+        session_id=session_id or params.get("session_id")
+    )
+
+
+async def _handle_get_recent_sessions(query, params, session_id):
+    return await get_recent_sessions(
+        db=db,
+        project_path=params.get("project_path"),
+        limit=params.get("limit", 10)
+    )
+
+
+async def _handle_bulk_review_by_type(query, params, session_id):
+    return await bulk_review_by_type(
+        db=db,
+        session_id=session_id or params.get("session_id"),
+        type_decisions=params.get("type_decisions", {})
+    )
+
+
+# --- Cross-Session Awareness Skills ---
+
+async def _handle_session_register(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.register_session(
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path", ""),
+        goal=params.get("goal"),
+        label=params.get("label"),
+    )
+
+
+async def _handle_session_heartbeat(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.heartbeat(
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path", ""),
+        files_modified=params.get("files_modified"),
+        current_goal=params.get("current_goal"),
+        key_decisions=params.get("key_decisions"),
+        summary=params.get("summary"),
+    )
+
+
+async def _handle_session_deregister(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.deregister_session(
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path", ""),
+        final_summary=params.get("final_summary"),
+    )
+
+
+async def _handle_get_active_sessions(query, params, session_id):
+    awareness = get_session_awareness(db)
+    sessions = await db.get_active_sessions(
+        project_path=params.get("project_path", ""),
+        exclude_session_id=params.get("exclude_session_id"),
+    )
+    return {"success": True, "sessions": sessions, "count": len(sessions)}
+
+
+async def _handle_session_activity_feed(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.get_activity_feed(
+        project_path=params.get("project_path", ""),
+        limit=params.get("limit", 20),
+        since=params.get("since"),
+        exclude_session_id=params.get("exclude_session_id"),
+    )
+
+
+async def _handle_session_catchup(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.get_catchup(
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path", ""),
+        since=params.get("since"),
+    )
+
+
+async def _handle_session_conflicts(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.check_conflicts(
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path", ""),
+    )
+
+
+async def _handle_session_post_activity(query, params, session_id):
+    awareness = get_session_awareness(db)
+    return await awareness.post_activity(
+        session_id=session_id or params.get("session_id"),
+        project_path=params.get("project_path", ""),
+        event_type=params.get("event_type", "decision"),
+        summary=params.get("summary", ""),
+        files=params.get("files"),
+    )
+
+
+async def _handle_session_append_file(query, params, session_id):
+    return await db.append_file_modified(
+        session_id=session_id or params.get("session_id"),
+        file_path=params.get("file_path", ""),
+    )
+
+
+# ============================================================
+# SKILL DISPATCH TABLE
+# ============================================================
+# Maps skill_id strings to their async handler functions.
+# All handlers share the signature: (query, params, session_id) -> dict
+# ============================================================
+
+SKILL_DISPATCH = {
+    # Core Memory
+    "store_memory": _handle_store_memory,
+    "store_project": _handle_store_project,
+    "store_pattern": _handle_store_pattern,
+    "retrieve_memory": _handle_retrieve_memory,
+    "semantic_search": _handle_semantic_search,
+    "search_patterns": _handle_search_patterns,
+    "get_project_context": _handle_get_project_context,
+
+    # Session
+    "summarize_session": _handle_summarize_session,
+    "auto_summarize_session": _handle_auto_summarize_session,
+    "get_session_handoff": _handle_get_session_handoff,
+    "create_diary_entry": _handle_create_diary_entry,
+    "check_session_inactivity": _handle_check_session_inactivity,
+    "get_stats": _handle_get_stats,
+
+    # Timeline
+    "timeline_log": _handle_timeline_log,
+    "timeline_log_batch": _handle_timeline_log_batch,
+    "timeline_get": _handle_timeline_get,
+    "timeline_search": _handle_timeline_search,
+    "timeline_auto_detect": _handle_timeline_auto_detect,
+    "timeline_chain": _handle_timeline_chain,
+
+    # State
+    "state_get": _handle_state_get,
+    "state_update": _handle_state_update,
+    "state_init_session": _handle_state_init_session,
+
+    # Checkpoint
+    "checkpoint_create": _handle_checkpoint_create,
+    "checkpoint_load": _handle_checkpoint_load,
+    "checkpoint_list": _handle_checkpoint_list,
+
+    # Grounding (Anti-Hallucination)
+    "context_refresh": _handle_context_refresh,
+    "check_contradictions": _handle_check_contradictions,
+    "verify_entity": _handle_verify_entity,
+    "mark_anchor": _handle_mark_anchor,
+    "get_unresolved_conflicts": _handle_get_unresolved_conflicts,
+    "resolve_conflict": _handle_resolve_conflict,
+    "get_anchor_history": _handle_get_anchor_history,
+    "auto_resolve_conflicts": _handle_auto_resolve_conflicts,
+
+    # Self-Correcting Confidence
+    "memory_worked": _handle_memory_worked,
+    "memory_failed": _handle_memory_failed,
+    "get_reliability_stats": _handle_get_reliability_stats,
+    "get_unreliable_memories": _handle_get_unreliable_memories,
+    "reset_memory_reliability": _handle_reset_memory_reliability,
+
+    # CLAUDE.MD Management
+    "claude_md_read": _handle_claude_md_read,
+    "claude_md_add_section": _handle_claude_md_add_section,
+    "claude_md_update_section": _handle_claude_md_update_section,
+    "claude_md_add_instruction": _handle_claude_md_add_instruction,
+    "claude_md_list_sections": _handle_claude_md_list_sections,
+    "claude_md_suggest": _handle_claude_md_suggest,
+
+    # Verification
+    "best_of_n_verify": _handle_best_of_n_verify,
+    "extract_quotes": _handle_extract_quotes,
+    "require_grounding": _handle_require_grounding,
+
+    # Cross-Session Learning
+    "run_aggregation": _handle_run_aggregation,
+    "get_insights": _handle_get_insights,
+    "suggest_improvements": _handle_suggest_improvements,
+    "record_insight_feedback": _handle_record_insight_feedback,
+    "mark_insight_applied": _handle_mark_insight_applied,
+    "get_project_insights": _handle_get_project_insights,
+
+    # Memory Cleanup
+    "memory_cleanup": _handle_memory_cleanup,
+    "get_archived_memories": _handle_get_archived_memories,
+    "restore_memory": _handle_restore_memory,
+    "get_cleanup_config": _handle_get_cleanup_config,
+    "set_cleanup_config": _handle_set_cleanup_config,
+    "get_cleanup_stats": _handle_get_cleanup_stats,
+    "purge_expired_archives": _handle_purge_expired_archives,
+
+    # Admin (Embedding Model Management)
+    "get_embedding_status": _handle_get_embedding_status,
+    "switch_embedding_model": _handle_switch_embedding_model,
+    "reindex_memories": _handle_reindex_memories,
+    "get_reindex_progress": _handle_get_reindex_progress,
+    "cancel_reindex": _handle_cancel_reindex,
+    "get_model_info": _handle_get_model_info,
+    "get_system_stats": _handle_get_system_stats,
+
+    # MoltBot-Inspired (Human-Readable Transparency)
+    "daily_log_append": _handle_daily_log_append,
+    "daily_log_append_session": _handle_daily_log_append_session,
+    "daily_log_read": _handle_daily_log_read,
+    "daily_log_highlights": _handle_daily_log_highlights,
+    "daily_log_list": _handle_daily_log_list,
+    "sync_memory_md": _handle_sync_memory_md,
+    "read_memory_md": _handle_read_memory_md,
+    "get_memory_md_summary": _handle_get_memory_md_summary,
+    "add_memory_md_fact": _handle_add_memory_md_fact,
+    "check_flush_needed": _handle_check_flush_needed,
+    "pre_compaction_flush": _handle_pre_compaction_flush,
+    "list_flushes": _handle_list_flushes,
+    "read_flush": _handle_read_flush,
+
+    # Outcome Spectrum
+    "update_memory_outcome": _handle_update_memory_outcome,
+    "supersede_memory": _handle_supersede_memory,
+    "get_superseding_memory": _handle_get_superseding_memory,
+
+    # Curator Agent
+    "curator_explore": _handle_curator_explore,
+    "curator_find_duplicates": _handle_curator_find_duplicates,
+    "curator_suggest_links": _handle_curator_suggest_links,
+    "curator_merge": _handle_curator_merge,
+    "curator_get_summary": _handle_curator_get_summary,
+    "curator_run_maintenance": _handle_curator_run_maintenance,
+    "curator_get_report": _handle_curator_get_report,
+    "curator_get_status": _handle_curator_get_status,
+    "curator_score_quality": _handle_curator_score_quality,
+    "curator_find_orphans": _handle_curator_find_orphans,
+
+    # Memory Decay
+    "decay_maintenance": _handle_decay_maintenance,
+    "decay_stats": _handle_decay_stats,
+    "decay_boost": _handle_decay_boost,
+
+    # Tier 1 Auto-Generation
+    "generate_tier1": _handle_generate_tier1,
+
+    # Session Review
+    "get_session_memories": _handle_get_session_memories,
+    "review_session_memories": _handle_review_session_memories,
+    "suggest_session_reviews": _handle_suggest_session_reviews,
+    "get_recent_sessions": _handle_get_recent_sessions,
+    "bulk_review_by_type": _handle_bulk_review_by_type,
+
+    # Cross-Session Awareness
+    "session_register": _handle_session_register,
+    "session_heartbeat": _handle_session_heartbeat,
+    "session_deregister": _handle_session_deregister,
+    "get_active_sessions": _handle_get_active_sessions,
+    "session_activity_feed": _handle_session_activity_feed,
+    "session_catchup": _handle_session_catchup,
+    "session_conflicts": _handle_session_conflicts,
+    "session_post_activity": _handle_session_post_activity,
+    "session_append_file": _handle_session_append_file,
+}
+
+
 async def execute_skill(
     skill_id: str,
     query: str,
     params: Dict[str, Any],
     session_id: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Execute the specified skill with enhanced context support."""
-    # Debug to file
-    with open("c:/Users/moham/Desktop/Claude Memory/memory-agent/debug.log", "a") as f:
-        f.write(f"[SKILL DEBUG] execute_skill called with skill_id='{skill_id}'\n")
-        f.flush()
-
-    if skill_id == "store_memory":
-        result = await store_memory(
-            db=db,
-            embeddings=embeddings,
-            content=params.get("content", query),
-            memory_type=params.get("type", "chunk"),
-            metadata=params.get("metadata"),
-            session_id=session_id or params.get("session_id"),
-            # Project context
-            project_path=params.get("project_path"),
-            project_name=params.get("project_name"),
-            project_type=params.get("project_type"),
-            tech_stack=params.get("tech_stack"),
-            # Agent context
-            agent_type=params.get("agent_type"),
-            skill_used=params.get("skill_used"),
-            tools_used=params.get("tools_used"),
-            # Outcome
-            outcome=params.get("outcome"),
-            success=params.get("success"),
-            # Classification
-            tags=params.get("tags"),
-            importance=params.get("importance", 5),
-            confidence=params.get("confidence", 0.5),
-            # Outcome spectrum
-            outcome_status=params.get("outcome_status", "pending"),
-            fixed=params.get("fixed"),
-            did_not_fix=params.get("did_not_fix"),
-            caused=params.get("caused")
-        )
-        # Broadcast real-time update
-        print(f"[DEBUG] About to broadcast memory_stored event for memory_id={result.get('memory_id')}")
-        try:
-            await broadcast_event(
-                EventTypes.MEMORY_STORED,
-                {"memory_id": result.get("memory_id"), "type": params.get("type", "chunk")},
-                params.get("project_path")
-            )
-            print(f"[DEBUG] Broadcast completed successfully")
-        except Exception as e:
-            print(f"[DEBUG] Broadcast error: {e}")
-        return result
-
-    elif skill_id == "store_project":
-        return await store_project(
-            db=db,
-            path=params.get("path"),
-            name=params.get("name"),
-            project_type=params.get("project_type"),
-            tech_stack=params.get("tech_stack"),
-            conventions=params.get("conventions"),
-            preferences=params.get("preferences")
-        )
-
-    elif skill_id == "store_pattern":
-        return await store_pattern(
-            db=db,
-            embeddings=embeddings,
-            name=params.get("name"),
-            solution=params.get("solution"),
-            problem_type=params.get("problem_type"),
-            tech_context=params.get("tech_context"),
-            metadata=params.get("metadata")
-        )
-
-    elif skill_id == "retrieve_memory":
-        return await retrieve_memory(
-            db=db,
-            memory_id=params.get("memory_id"),
-            memory_type=params.get("type"),
-            session_id=session_id or params.get("session_id"),
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 10)
-        )
-
-    elif skill_id == "semantic_search":
-        return await semantic_search(
-            db=db,
-            embeddings=embeddings,
-            query=params.get("query", query),
-            limit=params.get("limit", 10),
-            memory_type=params.get("type"),
-            session_id=session_id or params.get("session_id"),
-            project_path=params.get("project_path"),
-            agent_type=params.get("agent_type"),
-            success_only=params.get("success_only", False),
-            threshold=params.get("threshold", 0.5),
-            # Outcome spectrum filters
-            include_failed=params.get("include_failed", False),
-            include_superseded=params.get("include_superseded", False),
-            include_unreliable=params.get("include_unreliable", False),
-            outcome_status=params.get("outcome_status")
-        )
-
-    elif skill_id == "search_patterns":
-        return await search_patterns(
-            db=db,
-            embeddings=embeddings,
-            query=params.get("query", query),
-            limit=params.get("limit", 5),
-            problem_type=params.get("problem_type"),
-            threshold=params.get("threshold", 0.5)
-        )
-
-    elif skill_id == "get_project_context":
-        return await get_project_context(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            query=params.get("query"),
-            limit=params.get("limit", 10)
-        )
-
-    elif skill_id == "summarize_session":
-        return await summarize_session(
-            db=db,
-            embeddings=embeddings,
-            session_id=session_id or params.get("session_id", str(uuid.uuid4())),
-            summary=params.get("summary", query),
-            key_decisions=params.get("key_decisions"),
-            code_patterns=params.get("code_patterns"),
-            metadata=params.get("metadata"),
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "auto_summarize_session":
-        return await auto_summarize_session(
-            db=db,
-            embeddings=embeddings,
-            session_id=session_id or params.get("session_id"),
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "get_session_handoff":
-        return await get_session_handoff(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            include_last_n_sessions=params.get("include_last_n_sessions", 3)
-        )
-
-    elif skill_id == "create_diary_entry":
-        return await create_diary_entry(
-            db=db,
-            embeddings=embeddings,
-            session_id=session_id or params.get("session_id"),
-            project_path=params.get("project_path"),
-            user_notes=params.get("user_notes")
-        )
-
-    elif skill_id == "check_session_inactivity":
-        return await check_session_inactivity(
-            db=db,
-            session_id=session_id or params.get("session_id"),
-            inactivity_threshold_hours=params.get("inactivity_threshold_hours", 4.0)
-        )
-
-    elif skill_id == "get_stats":
-        return await db.get_stats()
-
-    # ============================================================
-    # TIMELINE SKILLS
-    # ============================================================
-
-    elif skill_id == "timeline_log":
-        result = await timeline_log(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
-            event_type=params.get("event_type", "observation"),
-            summary=params.get("summary", query),
-            details=params.get("details"),
-            project_path=params.get("project_path"),
-            parent_event_id=params.get("parent_event_id"),
-            root_event_id=params.get("root_event_id"),
-            entities=params.get("entities"),
-            status=params.get("status", "completed"),
-            outcome=params.get("outcome"),
-            confidence=params.get("confidence"),
-            is_anchor=params.get("is_anchor", False)
-        )
-        # Broadcast real-time update
-        await broadcast_event(
-            EventTypes.TIMELINE_LOGGED,
-            {"event_id": result.get("event_id"), "event_type": params.get("event_type", "observation")},
-            params.get("project_path")
-        )
-        return result
-
-    elif skill_id == "timeline_log_batch":
-        # Batch logging - more efficient than multiple timeline_log calls
-        result = await timeline_log_batch(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
-            events=params.get("events", []),
-            project_path=params.get("project_path"),
-            parent_event_id=params.get("parent_event_id"),
-            root_event_id=params.get("root_event_id")
-        )
-        # Broadcast single update for the batch
-        if result.get("events_logged", 0) > 0:
-            await broadcast_event(
-                EventTypes.TIMELINE_LOGGED,
-                {
-                    "event_ids": result.get("event_ids", []),
-                    "batch_size": result.get("events_logged", 0),
-                    "event_types": result.get("event_types", {})
-                },
-                params.get("project_path")
-            )
-        return result
-
-    elif skill_id == "timeline_get":
-        return await timeline_get(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            limit=params.get("limit", 20),
-            event_type=params.get("event_type"),
-            since_event_id=params.get("since_event_id"),
-            anchors_only=params.get("anchors_only", False),
-            include_state=params.get("include_state", True),
-            include_checkpoint=params.get("include_checkpoint", True)
-        )
-
-    elif skill_id == "timeline_search":
-        return await timeline_search(
-            db=db,
-            embeddings=embeddings,
-            query=params.get("query", query),
-            session_id=params.get("session_id") or session_id,
-            limit=params.get("limit", 10),
-            threshold=params.get("threshold", 0.5)
-        )
-
-    elif skill_id == "timeline_auto_detect":
-        return await timeline_auto_detect(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id or str(uuid.uuid4()),
-            response_text=params.get("response_text", query),
-            project_path=params.get("project_path"),
-            parent_event_id=params.get("parent_event_id")
-        )
-
-    elif skill_id == "timeline_chain":
-        return await timeline_chain(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            root_event_id=params.get("root_event_id"),
-            include_details=params.get("include_details", False)
-        )
-
-    # ============================================================
-    # STATE SKILLS
-    # ============================================================
-
-    elif skill_id == "state_get":
-        return await state_get(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "state_update":
-        return await state_update(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            current_goal=params.get("current_goal"),
-            pending_questions=params.get("pending_questions"),
-            add_question=params.get("add_question"),
-            remove_question=params.get("remove_question"),
-            register_entity=params.get("register_entity"),
-            entity_registry=params.get("entity_registry"),
-            add_decision=params.get("add_decision"),
-            decisions_summary=params.get("decisions_summary")
-        )
-
-    elif skill_id == "state_init_session":
-        return await state_init_session(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path")
-        )
-
-    # ============================================================
-    # CHECKPOINT SKILLS
-    # ============================================================
-
-    elif skill_id == "checkpoint_create":
-        return await checkpoint_create(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id,
-            summary=params.get("summary"),
-            key_facts=params.get("key_facts"),
-            include_state=params.get("include_state", True)
-        )
-
-    elif skill_id == "checkpoint_load":
-        return await checkpoint_load(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            checkpoint_id=params.get("checkpoint_id"),
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "checkpoint_list":
-        return await checkpoint_list(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            limit=params.get("limit", 10)
-        )
-
-    # ============================================================
-    # GROUNDING SKILLS (Anti-Hallucination)
-    # ============================================================
-
-    elif skill_id == "context_refresh":
-        return await context_refresh(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id,
-            query=params.get("query", query) if query else None,
-            include_recent_events=params.get("include_recent_events", 10),
-            include_state=params.get("include_state", True),
-            include_checkpoint=params.get("include_checkpoint", True),
-            include_relevant_memories=params.get("include_relevant_memories", True),
-            check_contradictions=params.get("check_contradictions", True)
-        )
-
-    elif skill_id == "check_contradictions":
-        return await check_contradictions(
-            db=db,
-            embeddings=embeddings,
-            statement=params.get("statement", query),
-            session_id=params.get("session_id") or session_id,
-            scope=params.get("scope", "session")
-        )
-
-    elif skill_id == "verify_entity":
-        return await verify_entity(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            entity_key=params.get("entity_key"),
-            entity_type=params.get("entity_type")
-        )
-
-    elif skill_id == "mark_anchor":
-        result = await mark_anchor(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id,
-            fact=params.get("fact", query),
-            details=params.get("details"),
-            project_path=params.get("project_path"),
-            force=params.get("force", False)
-        )
-        # Broadcast real-time update
-        event_type = EventTypes.ANCHOR_CONFLICT if result.get("conflict_detected") else EventTypes.ANCHOR_MARKED
-        await broadcast_event(
-            event_type,
-            {"anchor_id": result.get("anchor_id"), "fact": params.get("fact", query)[:100]},
-            params.get("project_path")
-        )
-        return result
-
-    elif skill_id == "get_unresolved_conflicts":
-        return await get_unresolved_conflicts(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 20)
-        )
-
-    elif skill_id == "resolve_conflict":
-        return await resolve_conflict(
-            db=db,
-            embeddings=embeddings,
-            conflict_id=params.get("conflict_id"),
-            resolution=params.get("resolution"),
-            keep_anchor_id=params.get("keep_anchor_id"),
-            resolved_by=params.get("resolved_by", "user")
-        )
-
-    elif skill_id == "get_anchor_history":
-        return await get_anchor_history(
-            db=db,
-            anchor_id=params.get("anchor_id"),
-            session_id=params.get("session_id") or session_id,
-            limit=params.get("limit", 50)
-        )
-
-    elif skill_id == "auto_resolve_conflicts":
-        return await auto_resolve_conflicts(
-            db=db,
-            embeddings=embeddings,
-            session_id=params.get("session_id") or session_id
-        )
-
-    # ============================================================
-    # SELF-CORRECTING CONFIDENCE SKILLS
-    # ============================================================
-
-    elif skill_id == "memory_worked":
-        from skills.confidence_tracker import report_solution_outcome
-        result = await report_solution_outcome(
-            db=db,
-            memory_id=params.get("memory_id"),
-            worked=True,
-            context=params.get("context")
-        )
-        if result.get("success"):
-            await broadcast_event(
-                EventTypes.MEMORY_UPDATED,
-                {
-                    "memory_id": params.get("memory_id"),
-                    "action": "worked",
-                    "new_confidence": result.get("new_confidence"),
-                    "reliability": result.get("reliability")
-                }
-            )
-        return result
-
-    elif skill_id == "memory_failed":
-        from skills.confidence_tracker import report_solution_outcome
-        result = await report_solution_outcome(
-            db=db,
-            memory_id=params.get("memory_id"),
-            worked=False,
-            context=params.get("context")
-        )
-        if result.get("success"):
-            await broadcast_event(
-                EventTypes.MEMORY_UPDATED,
-                {
-                    "memory_id": params.get("memory_id"),
-                    "action": "failed",
-                    "new_confidence": result.get("new_confidence"),
-                    "reliability": result.get("reliability"),
-                    "is_unreliable": result.get("is_unreliable")
-                }
-            )
-        return result
-
-    elif skill_id == "get_reliability_stats":
-        from skills.confidence_tracker import get_reliability_stats
-        return await get_reliability_stats(
-            db=db,
-            memory_id=params.get("memory_id")
-        )
-
-    elif skill_id == "get_unreliable_memories":
-        from skills.confidence_tracker import get_unreliable_memories
-        return await get_unreliable_memories(
-            db=db,
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 50)
-        )
-
-    elif skill_id == "reset_memory_reliability":
-        from skills.confidence_tracker import reset_memory_reliability
-        return await reset_memory_reliability(
-            db=db,
-            memory_id=params.get("memory_id"),
-            new_confidence=params.get("confidence", 0.5)
-        )
-
-    # ============================================================
-    # CLAUDE.MD MANAGEMENT SKILLS
-    # ============================================================
-
-    elif skill_id == "claude_md_read":
-        return await claude_md_read(
-            section=params.get("section")
-        )
-
-    elif skill_id == "claude_md_add_section":
-        return await claude_md_add_section(
-            section_name=params.get("section_name"),
-            content=params.get("content", query),
-            position=params.get("position", "end")
-        )
-
-    elif skill_id == "claude_md_update_section":
-        return await claude_md_update_section(
-            section_name=params.get("section_name"),
-            content=params.get("content", query),
-            mode=params.get("mode", "replace")
-        )
-
-    elif skill_id == "claude_md_add_instruction":
-        return await claude_md_add_instruction(
-            section_name=params.get("section_name"),
-            instruction=params.get("instruction", query),
-            bullet_style=params.get("bullet_style", "-")
-        )
-
-    elif skill_id == "claude_md_list_sections":
-        return await claude_md_list_sections()
-
-    elif skill_id == "claude_md_suggest":
-        return await claude_md_suggest_from_session(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            min_importance=params.get("min_importance", 7)
-        )
-
-    # ============================================================
-    # VERIFICATION SKILLS (Best-of-N, Quote Extraction)
-    # ============================================================
-
-    elif skill_id == "best_of_n_verify":
-        return await best_of_n_verify(
-            query=params.get("query", query),
-            n=params.get("n", 3),
-            context=params.get("context"),
-            threshold=params.get("threshold", 0.7)
-        )
-
-    elif skill_id == "extract_quotes":
-        return await extract_quotes(
-            document=params.get("document", ""),
-            query=params.get("query", query),
-            max_quotes=params.get("max_quotes", 5),
-            min_length=params.get("min_length", 20)
-        )
-
-    elif skill_id == "require_grounding":
-        return await require_grounding(
-            db=db,
-            session_id=params.get("session_id") or session_id,
-            statement=params.get("statement", query),
-            source_type=params.get("source_type", "any")
-        )
-
-    # ============================================================
-    # CROSS-SESSION LEARNING SKILLS
-    # ============================================================
-
-    elif skill_id == "run_aggregation":
-        return await run_aggregation(
-            db=db,
-            embeddings=embeddings,
-            days_back=params.get("days_back", 30)
-        )
-
-    elif skill_id == "get_insights":
-        return await get_insights(
-            db=db,
-            embeddings=embeddings,
-            insight_type=params.get("insight_type"),
-            project_path=params.get("project_path"),
-            min_confidence=params.get("min_confidence", 0.5),
-            limit=params.get("limit", 10)
-        )
-
-    elif skill_id == "suggest_improvements":
-        return await suggest_improvements(
-            db=db,
-            embeddings=embeddings,
-            min_confidence=params.get("min_confidence", 0.7)
-        )
-
-    elif skill_id == "record_insight_feedback":
-        return await record_insight_feedback(
-            db=db,
-            embeddings=embeddings,
-            insight_id=params.get("insight_id"),
-            helpful=params.get("helpful", True),
-            session_id=session_id or params.get("session_id"),
-            comment=params.get("comment")
-        )
-
-    elif skill_id == "mark_insight_applied":
-        return await mark_insight_applied(
-            db=db,
-            embeddings=embeddings,
-            insight_id=params.get("insight_id")
-        )
-
-    elif skill_id == "get_project_insights":
-        return await get_project_insights(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            include_global=params.get("include_global", True),
-            limit=params.get("limit", 10)
-        )
-
-    # ============================================================
-    # MEMORY CLEANUP SKILLS
-    # ============================================================
-
-    elif skill_id == "memory_cleanup":
-        result = await memory_cleanup(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            dry_run=params.get("dry_run", True)
-        )
-        # Broadcast real-time update (only for actual cleanup, not dry run)
-        if not params.get("dry_run", True):
-            await broadcast_event(
-                EventTypes.CLEANUP_COMPLETED,
-                {"archived": result.get("total_archived", 0), "deleted": result.get("total_deleted", 0)},
-                params.get("project_path")
-            )
-        return result
-
-    elif skill_id == "get_archived_memories":
-        return await get_archived_memories(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            reason=params.get("reason"),
-            limit=params.get("limit", 50)
-        )
-
-    elif skill_id == "restore_memory":
-        return await restore_memory(
-            db=db,
-            embeddings=embeddings,
-            archive_id=params.get("archive_id")
-        )
-
-    elif skill_id == "get_cleanup_config":
-        return await get_cleanup_config(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "set_cleanup_config":
-        return await set_cleanup_config(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            retention_days=params.get("retention_days"),
-            min_relevance_score=params.get("min_relevance_score"),
-            keep_high_importance=params.get("keep_high_importance"),
-            importance_threshold=params.get("importance_threshold"),
-            dedup_enabled=params.get("dedup_enabled"),
-            dedup_threshold=params.get("dedup_threshold"),
-            archive_before_delete=params.get("archive_before_delete"),
-            auto_cleanup_enabled=params.get("auto_cleanup_enabled")
-        )
-
-    elif skill_id == "get_cleanup_stats":
-        return await get_cleanup_stats(db=db, embeddings=embeddings)
-
-    elif skill_id == "purge_expired_archives":
-        return await purge_expired_archives(db=db, embeddings=embeddings)
-
-    # ============================================================
-    # ADMIN SKILLS (Embedding Model Management)
-    # ============================================================
-
-    elif skill_id == "get_embedding_status":
-        return await get_embedding_status(db=db, embeddings=embeddings)
-
-    elif skill_id == "switch_embedding_model":
-        return await switch_embedding_model(
-            db=db,
-            embeddings=embeddings,
-            model=params.get("model", "nomic-embed-text"),
-            reindex_existing=params.get("reindex_existing", False)
-        )
-
-    elif skill_id == "reindex_memories":
-        return await reindex_memories(
-            db=db,
-            embeddings=embeddings,
-            model=params.get("model"),
-            project_path=params.get("project_path"),
-            batch_size=params.get("batch_size", 10),
-            dry_run=params.get("dry_run", False)
-        )
-
-    elif skill_id == "get_reindex_progress":
-        return await get_reindex_progress(db=db, embeddings=embeddings)
-
-    elif skill_id == "cancel_reindex":
-        return await cancel_reindex(db=db, embeddings=embeddings)
-
-    elif skill_id == "get_model_info":
-        return await get_model_info(
-            db=db,
-            embeddings=embeddings,
-            model=params.get("model")
-        )
-
-    elif skill_id == "get_system_stats":
-        return await get_system_stats(db=db, embeddings=embeddings)
-
-    # ============================================================
-    # MOLTBOT-INSPIRED SKILLS (Human-Readable Transparency)
-    # ============================================================
-
-    elif skill_id == "daily_log_append":
-        from services.daily_log import append_entry
-        return await append_entry(
-            project_path=params.get("project_path"),
-            content=params.get("content", query),
-            entry_type=params.get("entry_type", "note"),
-            session_id=session_id or params.get("session_id")
-        )
-
-    elif skill_id == "daily_log_append_session":
-        from services.daily_log import append_session_summary
-        return await append_session_summary(
-            project_path=params.get("project_path"),
-            session_id=session_id or params.get("session_id"),
-            decisions=params.get("decisions"),
-            accomplishments=params.get("accomplishments"),
-            notes=params.get("notes"),
-            errors_solved=params.get("errors_solved")
-        )
-
-    elif skill_id == "daily_log_read":
-        from services.daily_log import load_recent_logs
-        return await load_recent_logs(
-            project_path=params.get("project_path"),
-            days=params.get("days", 2),
-            max_chars=params.get("max_chars", 8000)
-        )
-
-    elif skill_id == "daily_log_highlights":
-        from services.daily_log import get_today_highlights
-        return await get_today_highlights(
-            project_path=params.get("project_path"),
-            max_entries=params.get("max_entries", 10)
-        )
-
-    elif skill_id == "daily_log_list":
-        from services.daily_log import list_logs
-        return await list_logs(
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 30)
-        )
-
-    elif skill_id == "sync_memory_md":
-        from services.memory_md_sync import sync_to_memory_md
-        return await sync_to_memory_md(
-            db=db,
-            project_path=params.get("project_path"),
-            min_importance=params.get("min_importance", 7),
-            min_pattern_success=params.get("min_pattern_success", 3)
-        )
-
-    elif skill_id == "read_memory_md":
-        from services.memory_md_sync import read_memory_md
-        return await read_memory_md(
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "get_memory_md_summary":
-        from services.memory_md_sync import get_memory_md_summary
-        return await get_memory_md_summary(
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "add_memory_md_fact":
-        from services.memory_md_sync import add_fact
-        return await add_fact(
-            project_path=params.get("project_path"),
-            fact=params.get("fact", query),
-            section=params.get("section", "anchors")
-        )
-
-    elif skill_id == "check_flush_needed":
-        from services.compaction_flush import check_flush_needed
-        return await check_flush_needed(
-            db=db,
-            session_id=session_id or params.get("session_id"),
-            event_threshold=params.get("event_threshold", 50),
-            time_threshold_minutes=params.get("time_threshold_minutes", 30)
-        )
-
-    elif skill_id == "pre_compaction_flush":
-        from services.compaction_flush import execute_flush
-        return await execute_flush(
-            db=db,
-            project_path=params.get("project_path"),
-            session_id=session_id or params.get("session_id")
-        )
-
-    elif skill_id == "list_flushes":
-        from services.compaction_flush import list_flushes
-        return await list_flushes(
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 20)
-        )
-
-    elif skill_id == "read_flush":
-        from services.compaction_flush import read_flush
-        return await read_flush(
-            project_path=params.get("project_path"),
-            filename=params.get("filename")
-        )
-
-    # ============================================================
-    # OUTCOME SPECTRUM SKILLS
-    # ============================================================
-
-    elif skill_id == "update_memory_outcome":
-        result = await db.update_memory_outcome(
-            memory_id=params.get("memory_id"),
-            outcome_status=params.get("outcome_status"),
-            fixed=params.get("fixed"),
-            did_not_fix=params.get("did_not_fix"),
-            caused=params.get("caused"),
-            superseded_by=params.get("superseded_by")
-        )
-        # Broadcast real-time update
-        if result.get("success"):
-            await broadcast_event(
-                EventTypes.MEMORY_UPDATED,
-                {
-                    "memory_id": params.get("memory_id"),
-                    "outcome_status": params.get("outcome_status"),
-                    "action": "outcome_updated"
-                }
-            )
-        return result
-
-    elif skill_id == "supersede_memory":
-        result = await db.supersede_memory(
-            old_memory_id=params.get("old_memory_id"),
-            new_memory_id=params.get("new_memory_id"),
-            reason=params.get("reason")
-        )
-        # Broadcast real-time update
-        if result.get("success"):
-            await broadcast_event(
-                EventTypes.MEMORY_UPDATED,
-                {
-                    "old_memory_id": params.get("old_memory_id"),
-                    "new_memory_id": params.get("new_memory_id"),
-                    "action": "superseded"
-                }
-            )
-        return result
-
-    elif skill_id == "get_superseding_memory":
-        superseding = await db.get_superseding_memory(
-            memory_id=params.get("memory_id")
-        )
-        return {
-            "success": True,
-            "superseded": superseding is not None,
-            "superseding_memory": superseding
-        }
-
-    # ============================================================
-    # CURATOR AGENT SKILLS
-    # ============================================================
-
-    elif skill_id == "curator_explore":
-        from skills.curator import curator_explore
-        return await curator_explore(
-            db=db,
-            embeddings=embeddings,
-            start_node_id=params.get("start_node_id"),
-            max_depth=params.get("max_depth", 3),
-            mode=params.get("mode", "bfs"),
-            relationship_filter=params.get("relationship_filter")
-        )
-
-    elif skill_id == "curator_find_duplicates":
-        from skills.curator import curator_find_duplicates
-        return await curator_find_duplicates(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            similarity_threshold=params.get("similarity_threshold", 0.92),
-            limit=params.get("limit", 50)
-        )
-
-    elif skill_id == "curator_suggest_links":
-        from skills.curator import curator_suggest_links
-        return await curator_suggest_links(
-            db=db,
-            embeddings=embeddings,
-            memory_id=params.get("memory_id"),
-            project_path=params.get("project_path"),
-            similarity_threshold=params.get("similarity_threshold", 0.7),
-            limit=params.get("limit", 20)
-        )
-
-    elif skill_id == "curator_merge":
-        from skills.curator import curator_merge
-        return await curator_merge(
-            db=db,
-            embeddings=embeddings,
-            keep_id=params.get("keep_id"),
-            remove_ids=params.get("remove_ids", []),
-            merge_content=params.get("merge_content", False)
-        )
-
-    elif skill_id == "curator_get_summary":
-        from skills.curator import curator_get_summary
-        return await curator_get_summary(
-            db=db,
-            embeddings=embeddings,
-            query=params.get("query", query),
-            project_path=params.get("project_path"),
-            max_memories=params.get("max_memories", 10),
-            include_graph=params.get("include_graph", True)
-        )
-
-    elif skill_id == "curator_run_maintenance":
-        from skills.curator import curator_run_maintenance
-        return await curator_run_maintenance(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            tasks=params.get("tasks")
-        )
-
-    elif skill_id == "curator_get_report":
-        from skills.curator import curator_get_report
-        return await curator_get_report(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path")
-        )
-
-    elif skill_id == "curator_get_status":
-        from skills.curator import curator_get_status
-        return await curator_get_status(
-            db=db,
-            embeddings=embeddings
-        )
-
-    elif skill_id == "curator_score_quality":
-        from skills.curator import curator_score_quality
-        return await curator_score_quality(
-            db=db,
-            embeddings=embeddings,
-            memory_id=params.get("memory_id"),
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 100)
-        )
-
-    elif skill_id == "curator_find_orphans":
-        from skills.curator import curator_find_orphans
-        return await curator_find_orphans(
-            db=db,
-            embeddings=embeddings,
-            project_path=params.get("project_path"),
-            limit=params.get("limit", 50)
-        )
-
-    else:
+    """Execute the specified skill with enhanced context support.
+
+    Dispatches to the appropriate handler via SKILL_DISPATCH lookup table.
+    Each handler receives (query, params, session_id) and returns a dict.
+    """
+    handler = SKILL_DISPATCH.get(skill_id)
+    if handler is None:
         raise ValueError(f"Unknown skill: {skill_id}")
+    return await handler(query, params, session_id)
 
 
 # ============= REST API Endpoints =============
@@ -1416,6 +1983,7 @@ async def api_get_stats():
         stats["timeline_stats_error"] = f"Unexpected error: {str(e)}"
 
     stats["success"] = True
+    stats["operation_metrics"] = metrics.to_dict()
     return stats
 
 
@@ -1538,7 +2106,12 @@ async def api_get_timeline(
 ):
     """Get timeline events with optional filtering."""
     try:
-        query = "SELECT * FROM timeline_events WHERE 1=1"
+        # Exclude the embedding column - it's a large binary blob that makes responses huge
+        query = """SELECT id, session_id, project_path, event_type, sequence_num,
+                   summary, details, parent_event_id, root_event_id, entities,
+                   status, outcome, confidence, is_anchor, is_reversible,
+                   needs_verification, created_at
+                   FROM timeline_events WHERE 1=1"""
         params = []
 
         if project_path:
@@ -3632,21 +4205,33 @@ async def get_all_agents():
 
 @app.get("/api/mcps")
 async def get_all_mcps():
-    """Get all available MCP servers."""
+    """Get all available MCP servers with live configured status."""
+    mcps = load_configured_mcps()
+    configured_count = sum(1 for m in mcps if m.get("configured"))
     return {
         "success": True,
-        "mcps": AVAILABLE_MCPS,
-        "total": len(AVAILABLE_MCPS)
+        "mcps": mcps,
+        "total": len(mcps),
+        "configured": configured_count
     }
 
 
 @app.get("/api/hooks")
 async def get_all_hooks():
-    """Get all available hooks."""
+    """Get all available hooks with live configured status."""
+    hooks = load_configured_hooks()
+    configured_count = sum(1 for h in hooks if h.get("configured"))
+    # Group by trigger for dashboard convenience
+    by_trigger: dict = {}
+    for h in hooks:
+        trigger = h.get("trigger", "Unknown")
+        by_trigger.setdefault(trigger, []).append(h)
     return {
         "success": True,
-        "hooks": AVAILABLE_HOOKS,
-        "total": len(AVAILABLE_HOOKS)
+        "hooks": hooks,
+        "total": len(hooks),
+        "configured": configured_count,
+        "by_trigger": by_trigger
     }
 
 
@@ -3698,7 +4283,8 @@ async def get_project_config(project_path: str):
                     'settings': {}
                 }
 
-        # Build MCP status map
+        # Build MCP status map using dynamic loader
+        live_mcps = load_configured_mcps(project_path)
         mcp_status = {}
         for config in (mcp_configs or []):
             mcp_status[config['mcp_id']] = {
@@ -3706,14 +4292,18 @@ async def get_project_config(project_path: str):
                 'settings': json.loads(config['settings']) if config['settings'] else {}
             }
 
-        for mcp in AVAILABLE_MCPS:
+        for mcp in live_mcps:
             if mcp['id'] not in mcp_status:
                 mcp_status[mcp['id']] = {
                     'enabled': mcp['default_enabled'],
+                    'configured': mcp.get('configured', False),
                     'settings': {}
                 }
+            else:
+                mcp_status[mcp['id']]['configured'] = mcp.get('configured', False)
 
-        # Build hook status map
+        # Build hook status map using dynamic loader
+        live_hooks = load_configured_hooks(project_path)
         hook_status = {}
         for config in (hook_configs or []):
             hook_status[config['hook_id']] = {
@@ -3721,12 +4311,17 @@ async def get_project_config(project_path: str):
                 'settings': json.loads(config['settings']) if config['settings'] else {}
             }
 
-        for hook in AVAILABLE_HOOKS:
+        for hook in live_hooks:
             if hook['id'] not in hook_status:
                 hook_status[hook['id']] = {
                     'enabled': hook['default_enabled'],
+                    'configured': hook.get('configured', False),
+                    'trigger': hook.get('trigger', ''),
                     'settings': {}
                 }
+            else:
+                hook_status[hook['id']]['configured'] = hook.get('configured', False)
+                hook_status[hook['id']]['trigger'] = hook.get('trigger', '')
 
         return {
             "success": True,
@@ -3738,10 +4333,12 @@ async def get_project_config(project_path: str):
             "stats": {
                 "enabled_agents": sum(1 for a in agent_status.values() if a['enabled']),
                 "total_agents": len(AVAILABLE_AGENTS),
-                "enabled_mcps": sum(1 for m in mcp_status.values() if m['enabled']),
-                "total_mcps": len(AVAILABLE_MCPS),
-                "enabled_hooks": sum(1 for h in hook_status.values() if h['enabled']),
-                "total_hooks": len(AVAILABLE_HOOKS)
+                "enabled_mcps": sum(1 for m in mcp_status.values() if m.get('enabled')),
+                "total_mcps": len(live_mcps),
+                "configured_mcps": sum(1 for m in mcp_status.values() if m.get('configured')),
+                "enabled_hooks": sum(1 for h in hook_status.values() if h.get('enabled')),
+                "total_hooks": len(live_hooks),
+                "configured_hooks": sum(1 for h in hook_status.values() if h.get('configured'))
             }
         }
     except DatabaseError as e:
@@ -4534,6 +5131,347 @@ async def curator_config_update_endpoint(
         return {"success": True, "config": config}
     except Exception as e:
         logger.error(f"Curator config update failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ============= Memory Decay API Endpoints =============
+
+@app.post("/api/decay/run")
+async def decay_run_endpoint():
+    """Run memory decay maintenance - evaluate all decayable memories and archive expired ones."""
+    try:
+        from services.memory_decay import MemoryDecayService
+        from config import config as app_config
+        decay_service = MemoryDecayService(
+            db=db,
+            archive_threshold=app_config.DECAY_ARCHIVE_THRESHOLD
+        )
+        result = await decay_service.apply_decay()
+        return result
+    except Exception as e:
+        logger.error(f"Decay maintenance failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/decay/stats")
+async def decay_stats_endpoint():
+    """Get memory decay statistics - permanent vs decayable counts, at-risk memories."""
+    try:
+        from services.memory_decay import MemoryDecayService
+        from config import config as app_config
+        decay_service = MemoryDecayService(
+            db=db,
+            archive_threshold=app_config.DECAY_ARCHIVE_THRESHOLD
+        )
+        result = await decay_service.get_decay_stats()
+        return result
+    except Exception as e:
+        logger.error(f"Decay stats failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/decay/boost/{memory_id}")
+async def decay_boost_endpoint(memory_id: int):
+    """Boost a memory's access count to resist decay."""
+    try:
+        from services.memory_decay import MemoryDecayService
+        from config import config as app_config
+        decay_service = MemoryDecayService(
+            db=db,
+            archive_threshold=app_config.DECAY_ARCHIVE_THRESHOLD
+        )
+        result = await decay_service.boost_on_access(memory_id)
+        return result
+    except Exception as e:
+        logger.error(f"Decay boost failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ============= Tier 1 Auto-Generation API Endpoint =============
+
+@app.post("/api/tier1/generate")
+async def tier1_generate_endpoint(request: Request):
+    """Generate Tier 1 context from top memories and write to CLAUDE.md.
+
+    Auto-generates a ranked summary of the most important memories and
+    writes it into CLAUDE.md between marker comments. All manually-written
+    content in CLAUDE.md is preserved.
+
+    Optional JSON body:
+        project_path: Filter to a specific project
+        dry_run: If true, return preview without writing (default false)
+    """
+    try:
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass  # No body is fine, all params are optional
+
+        from services.claude_md_sync import get_claude_md_sync
+        sync_service = get_claude_md_sync(db, embeddings)
+        result = await sync_service.write_tier1_to_claude_md(
+            project_path=body.get("project_path"),
+            dry_run=body.get("dry_run", False)
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Tier 1 generation failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ============= CLaRa-Inspired Memory Enhancement Endpoints =============
+
+@app.get("/api/tiers/stats")
+async def tier_stats_endpoint():
+    """Get memory distribution across tiers (hot/warm/cold)."""
+    try:
+        from services.tier_manager import TierManager
+        tier_mgr = TierManager(db)
+        return await tier_mgr.get_tier_stats()
+    except Exception as e:
+        logger.error(f"Tier stats failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/tiers/maintenance")
+async def tier_maintenance_endpoint(request: Request):
+    """Run tier maintenance (evaluate and update all memory tiers)."""
+    try:
+        body = {}
+        try:
+            body = await request.json()
+        except Exception:
+            pass
+        from services.tier_manager import TierManager
+        tier_mgr = TierManager(db)
+        return await tier_mgr.run_tier_maintenance(
+            skip_recent_hours=body.get("skip_recent_hours", 24)
+        )
+    except Exception as e:
+        logger.error(f"Tier maintenance failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/consolidation/run")
+async def consolidation_run_endpoint():
+    """Manually trigger memory consolidation."""
+    try:
+        from services.consolidation import ConsolidationService
+        consolidator = ConsolidationService(db, embeddings)
+        return await consolidator.run_consolidation()
+    except Exception as e:
+        logger.error(f"Consolidation failed: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/consolidation/candidates")
+async def consolidation_candidates_endpoint():
+    """Preview consolidation candidates without executing."""
+    try:
+        from services.consolidation import ConsolidationService
+        consolidator = ConsolidationService(db, embeddings)
+        groups = await consolidator.find_consolidation_candidates()
+        return {
+            "candidate_groups": len(groups),
+            "groups": [
+                {
+                    "size": len(g),
+                    "types": list(set(m.get('type', 'chunk') for m in g)),
+                    "ids": [m['id'] for m in g],
+                    "preview": g[0]['content'][:100] if g else ''
+                }
+                for g in groups
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Consolidation candidates failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/consolidation/{consolidated_id}/restore")
+async def consolidation_restore_endpoint(consolidated_id: int):
+    """Deconsolidate: restore original memories from a consolidated memory."""
+    try:
+        from services.consolidation import ConsolidationService
+        consolidator = ConsolidationService(db, embeddings)
+        return await consolidator.deconsolidate(consolidated_id)
+    except Exception as e:
+        logger.error(f"Deconsolidation failed: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/consolidation/stats")
+async def consolidation_stats_endpoint():
+    """Get consolidation statistics."""
+    try:
+        from services.consolidation import ConsolidationService
+        consolidator = ConsolidationService(db, embeddings)
+        return await consolidator.get_consolidation_stats()
+    except Exception as e:
+        logger.error(f"Consolidation stats failed: {e}")
+        return {"error": str(e)}
+
+
+@app.get("/api/embedding-pipeline/stats")
+async def embedding_pipeline_stats_endpoint():
+    """Get embedding pipeline statistics (cache hits, batch stats)."""
+    try:
+        from services.embedding_pipeline import get_embedding_pipeline
+        pipeline = get_embedding_pipeline()
+        if pipeline:
+            return pipeline.get_stats()
+        return {"error": "Pipeline not initialized"}
+    except Exception as e:
+        logger.error(f"Embedding pipeline stats failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/embedding-pipeline/precompute")
+async def embedding_precompute_endpoint():
+    """Manually trigger embedding pre-computation for memories with missing embeddings."""
+    try:
+        from services.embedding_pipeline import get_embedding_pipeline
+        pipeline = get_embedding_pipeline()
+        if pipeline:
+            return await pipeline.precompute_missing_embeddings()
+        return {"error": "Pipeline not initialized"}
+    except Exception as e:
+        logger.error(f"Embedding precompute failed: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/api/embeddings/migrate-binary")
+async def embeddings_migrate_binary_endpoint():
+    """Migrate existing JSON embeddings to binary format for storage savings."""
+    try:
+        result = await db.migrate_embeddings_to_binary()
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error(f"Embedding migration failed: {e}")
+        return {"error": str(e)}
+
+
+# ============================================================
+# CROSS-SESSION AWARENESS REST API
+# ============================================================
+
+@app.post("/api/sessions/register")
+async def api_session_register(request: Request):
+    """Register an active session."""
+    try:
+        body = await request.json()
+        awareness = get_session_awareness(db)
+        return await awareness.register_session(
+            session_id=body.get("session_id", ""),
+            project_path=body.get("project_path", ""),
+            goal=body.get("goal"),
+            label=body.get("label"),
+        )
+    except Exception as e:
+        logger.error(f"Session register failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/sessions/heartbeat")
+async def api_session_heartbeat(request: Request):
+    """Update session heartbeat, return siblings + conflicts."""
+    try:
+        body = await request.json()
+        awareness = get_session_awareness(db)
+        return await awareness.heartbeat(
+            session_id=body.get("session_id", ""),
+            project_path=body.get("project_path", ""),
+            files_modified=body.get("files_modified"),
+            current_goal=body.get("current_goal"),
+            key_decisions=body.get("key_decisions"),
+            summary=body.get("summary"),
+        )
+    except Exception as e:
+        logger.error(f"Session heartbeat failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/sessions/deregister")
+async def api_session_deregister(request: Request):
+    """Mark session as completed."""
+    try:
+        body = await request.json()
+        awareness = get_session_awareness(db)
+        return await awareness.deregister_session(
+            session_id=body.get("session_id", ""),
+            project_path=body.get("project_path", ""),
+            final_summary=body.get("final_summary"),
+        )
+    except Exception as e:
+        logger.error(f"Session deregister failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/sessions/active")
+async def api_active_sessions(project_path: str = "", exclude_session_id: Optional[str] = None):
+    """List active sessions for a project."""
+    try:
+        sessions = await db.get_active_sessions(project_path, exclude_session_id)
+        return {"success": True, "sessions": sessions, "count": len(sessions)}
+    except Exception as e:
+        logger.error(f"Get active sessions failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/sessions/activity-feed")
+async def api_session_activity_feed(
+    project_path: str = "", limit: int = 20,
+    since: Optional[str] = None, exclude_session_id: Optional[str] = None
+):
+    """Get recent cross-session activity events."""
+    try:
+        awareness = get_session_awareness(db)
+        return await awareness.get_activity_feed(project_path, limit, since, exclude_session_id)
+    except Exception as e:
+        logger.error(f"Activity feed failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/sessions/catch-up")
+async def api_session_catchup(
+    session_id: str = "", project_path: str = "", since: Optional[str] = None
+):
+    """What happened since timestamp, grouped by session."""
+    try:
+        awareness = get_session_awareness(db)
+        return await awareness.get_catchup(session_id, project_path, since)
+    except Exception as e:
+        logger.error(f"Session catch-up failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.get("/api/sessions/conflicts")
+async def api_session_conflicts(session_id: str = "", project_path: str = ""):
+    """Check file conflicts for a session."""
+    try:
+        awareness = get_session_awareness(db)
+        return await awareness.check_conflicts(session_id, project_path)
+    except Exception as e:
+        logger.error(f"Session conflicts failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/sessions/activity")
+async def api_post_session_activity(request: Request):
+    """Post an event to the cross-session activity feed."""
+    try:
+        body = await request.json()
+        awareness = get_session_awareness(db)
+        return await awareness.post_activity(
+            session_id=body.get("session_id", ""),
+            project_path=body.get("project_path", ""),
+            event_type=body.get("event_type", "decision"),
+            summary=body.get("summary", ""),
+            files=body.get("files"),
+        )
+    except Exception as e:
+        logger.error(f"Post session activity failed: {e}")
         return {"success": False, "error": str(e)}
 
 

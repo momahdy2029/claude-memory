@@ -299,6 +299,87 @@ def format_curator_context(curator_summary: dict, curator_status: dict) -> str:
     return "\n".join(lines)
 
 
+def call_rest_api(method: str, path: str, json_body: dict = None, params: dict = None, timeout: int = 3):
+    """Call the memory agent REST API (for endpoints that aren't A2A skills)."""
+    try:
+        url = f"{MEMORY_AGENT_URL}{path}"
+        if method == "POST":
+            response = requests.post(url, json=json_body, timeout=timeout)
+        else:
+            response = requests.get(url, params=params, timeout=timeout)
+        if response.status_code == 200:
+            return response.json()
+    except requests.RequestException as e:
+        logger.debug(f"REST API call failed ({path}): {e}")
+    return None
+
+
+def format_parallel_sessions(heartbeat_result: dict) -> str:
+    """Format parallel session info for context injection."""
+    if not heartbeat_result or not heartbeat_result.get("success"):
+        return ""
+
+    siblings = heartbeat_result.get("active_siblings", [])
+    conflicts = heartbeat_result.get("file_conflicts", [])
+
+    if not siblings:
+        return ""
+
+    lines = ["[PARALLEL SESSIONS]"]
+
+    # Build a set of conflicting files per session for quick lookup
+    conflict_map = {}
+    for c in conflicts:
+        conflict_map[c["session_id"]] = c.get("conflicting_files", [])
+
+    for sib in siblings:
+        label = sib.get("session_label") or sib.get("session_id", "")[:12]
+        status = sib.get("status", "active")
+        goal = sib.get("current_goal", "")
+        files = sib.get("files_modified", [])
+        decisions = sib.get("key_decisions", [])
+
+        # Calculate time since last heartbeat
+        last_hb = sib.get("last_heartbeat", "")
+        time_ago = ""
+        if last_hb:
+            try:
+                from datetime import datetime, timezone
+                hb_time = datetime.fromisoformat(last_hb.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc) if hb_time.tzinfo else datetime.now()
+                delta = now - hb_time
+                minutes = int(delta.total_seconds() / 60)
+                time_ago = f" ({minutes}m ago)" if minutes > 0 else " (just now)"
+            except (ValueError, TypeError):
+                pass
+
+        lines.append(f'Session "{label}" ({status}{time_ago}):')
+
+        if goal:
+            lines.append(f"  Working on: {goal}")
+
+        if files:
+            shown = files[:5]
+            lines.append(f"  Files changed: {', '.join(shown)}")
+            if len(files) > 5:
+                lines.append(f"    ...and {len(files) - 5} more")
+
+        if decisions:
+            for d in decisions[:2]:
+                lines.append(f"  Decision: {d}")
+
+        # Conflict warnings
+        sib_conflicts = conflict_map.get(sib.get("session_id"), [])
+        if sib_conflicts:
+            for f in sib_conflicts:
+                lines.append(f"  WARNING CONFLICT: You both modified {f}")
+
+    lines.append("[/PARALLEL SESSIONS]")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def check_and_trigger_flush(session_id: str, project_path: str):
     """Check if flush is needed and trigger it."""
     # Check flush conditions
@@ -338,6 +419,17 @@ def main():
     if not session_id:
         # No session, no grounding - exit silently
         sys.exit(0)
+
+    # ============================================================
+    # CROSS-SESSION AWARENESS: Heartbeat + parallel session context
+    # ============================================================
+    parallel_context = ""
+    heartbeat_result = call_rest_api("POST", "/api/sessions/heartbeat", {
+        "session_id": session_id,
+        "project_path": project_path,
+    })
+    if heartbeat_result:
+        parallel_context = format_parallel_sessions(heartbeat_result)
 
     # ============================================================
     # MOLTBOT-INSPIRED: Check flush conditions
@@ -399,6 +491,9 @@ def main():
 
     # Combine all context
     output_parts = []
+
+    if parallel_context:
+        output_parts.append(parallel_context)
 
     if memory_md_context:
         output_parts.append(memory_md_context)

@@ -23,7 +23,7 @@ import asyncio
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -128,6 +128,53 @@ async def send_to_memory(
         return False
 
 
+async def post_session_activity(session_id: str, project_path: str, event_type: str, summary: str, files: List[str] = None):
+    """Post a cross-session activity event and track modified files."""
+    if not session_id or not project_path:
+        return
+
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-Memory-Key"] = API_KEY
+
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            # Post activity event
+            await client.post(
+                f"{MEMORY_AGENT_URL}/api/sessions/activity",
+                json={
+                    "session_id": session_id,
+                    "project_path": project_path,
+                    "event_type": event_type,
+                    "summary": summary,
+                    "files": files or [],
+                },
+                headers=headers,
+            )
+
+            # Append files to session's modified files list
+            if files:
+                for f in files:
+                    await client.post(
+                        f"{MEMORY_AGENT_URL}/a2a",
+                        json={
+                            "jsonrpc": "2.0",
+                            "method": "skills/call",
+                            "params": {
+                                "skill_id": "session_append_file",
+                                "params": {
+                                    "session_id": session_id,
+                                    "file_path": f,
+                                }
+                            },
+                            "id": f"auto-capture-file-{datetime.now().isoformat()}"
+                        },
+                        headers=headers,
+                    )
+    except Exception as e:
+        logger.debug(f"Cross-session activity post failed: {e}")
+
+
 async def capture_tool_use(hook_data: Dict[str, Any]):
     """Capture a tool execution event."""
     tool_name = hook_data.get("tool_name", "Unknown")
@@ -181,6 +228,16 @@ async def capture_tool_use(hook_data: Dict[str, Any]):
     }
 
     await send_to_memory(content, mem_type, importance, metadata, project_path)
+
+    # ============================================================
+    # CROSS-SESSION AWARENESS: Post file changes to activity feed
+    # ============================================================
+    if tool_name in ("Write", "Edit") and session_id and project_path:
+        file_path = tool_input.get("file_path", "")
+        if file_path:
+            event_type = "file_change"
+            summary = f"{'Created' if tool_name == 'Write' else 'Edited'} {file_path}"
+            await post_session_activity(session_id, project_path, event_type, summary, [file_path])
 
 
 async def capture_notification(hook_data: Dict[str, Any]):

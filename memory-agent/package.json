@@ -1,6 +1,6 @@
 {
   "name": "claude-memory-agent",
-  "version": "2.1.0",
+  "version": "2.2.4",
   "description": "Persistent semantic memory system for Claude Code sessions with anti-hallucination grounding",
   "keywords": [
     "claude",
@@ -27,7 +27,11 @@
     "*.md",
     "*.txt",
     "*.html",
-    ".env.example"
+    ".env.example",
+    "!**/__pycache__/",
+    "!**/*.pyc",
+    "!test_*.py",
+    "!verify_db.py"
   ],
   "scripts": {
     "postinstall": "node bin/postinstall.js",
@@ -43,5 +47,12 @@
     "darwin",
     "linux"
   ],
-  "preferGlobal": true
+  "preferGlobal": true,
+  "dependencies": {
+    "@inquirer/prompts": "^7.10.1",
+    "boxen": "^5.1.2",
+    "chalk": "^4.1.2",
+    "gradient-string": "^2.0.2",
+    "ora": "^5.4.1"
+  }
 }

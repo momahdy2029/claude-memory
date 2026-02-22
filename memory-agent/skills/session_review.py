@@ -10,6 +10,36 @@ from services.database import DatabaseService
 from services.embeddings import EmbeddingService
 
 
+async def _get_session_time_window(
+    db: DatabaseService,
+    session_id: str
+) -> Optional[Dict[str, str]]:
+    """
+    Look up a session's time window from the session_state table.
+
+    Returns dict with 'started_at' and 'ended_at' if found, None otherwise.
+    """
+    session_row = await db.execute_query(
+        """
+        SELECT created_at, updated_at, project_path, current_goal
+        FROM session_state
+        WHERE session_id = ?
+        AND session_id NOT LIKE '{%}'
+        LIMIT 1
+        """,
+        [session_id]
+    )
+    if session_row:
+        row = session_row[0]
+        return {
+            "started_at": row.get("created_at"),
+            "ended_at": row.get("updated_at") or row.get("created_at"),
+            "project_path": row.get("project_path"),
+            "current_goal": row.get("current_goal")
+        }
+    return None
+
+
 async def get_session_memories(
     db: DatabaseService,
     session_id: str,
@@ -18,6 +48,12 @@ async def get_session_memories(
 ) -> Dict[str, Any]:
     """
     Get all memories created in a specific session for review.
+
+    Uses two strategies:
+    1. Direct match: memories WHERE session_id = ? (when memories have session_ids)
+    2. Time-window match: finds the session in session_state and matches memories
+       created within that session's time window (fallback for when memories
+       lack session_ids)
 
     Args:
         db: Database service instance
@@ -34,7 +70,7 @@ async def get_session_memories(
             "error": "session_id is required"
         }
 
-    # Get memories for this session
+    # Strategy 1: Direct session_id match on memories table
     memories_query = """
         SELECT
             id, type, content, project_path, project_name,
@@ -45,33 +81,58 @@ async def get_session_memories(
         ORDER BY created_at DESC
         LIMIT ?
     """
-
     memories = await db.execute_query(memories_query, [session_id, limit])
+
+    # Strategy 2: Time-window fallback using session_state table
+    match_method = "session_id"
+    if not memories:
+        time_window = await _get_session_time_window(db, session_id)
+        if time_window:
+            tw_query = """
+                SELECT
+                    id, type, content, project_path, project_name,
+                    outcome, success, outcome_status, confidence,
+                    importance, tags, created_at
+                FROM memories
+                WHERE created_at >= ?
+                AND created_at <= ?
+            """
+            tw_params = [time_window["started_at"], time_window["ended_at"]]
+
+            # If the session has a project_path, filter by it
+            if time_window.get("project_path"):
+                tw_query += " AND project_path = ?"
+                tw_params.append(time_window["project_path"])
+
+            tw_query += " ORDER BY created_at DESC LIMIT ?"
+            tw_params.append(limit)
+
+            memories = await db.execute_query(tw_query, tw_params)
+            match_method = "time_window"
 
     result = {
         "success": True,
         "session_id": session_id,
         "memories": memories or [],
-        "memory_count": len(memories) if memories else 0
+        "memory_count": len(memories) if memories else 0,
+        "match_method": match_method
     }
 
     # Optionally include patterns
-    if include_patterns:
+    if include_patterns and memories:
+        min_time = min(m.get("created_at", "") for m in memories)
+        max_time = max(m.get("created_at", "") for m in memories)
         patterns_query = """
             SELECT
                 id, name, problem_type, solution,
                 success_count, failure_count, created_at
             FROM patterns
-            WHERE created_at >= (
-                SELECT MIN(created_at) FROM memories WHERE session_id = ?
-            )
-            AND created_at <= (
-                SELECT MAX(created_at) FROM memories WHERE session_id = ?
-            )
+            WHERE created_at >= ?
+            AND created_at <= ?
             ORDER BY created_at DESC
             LIMIT ?
         """
-        patterns = await db.execute_query(patterns_query, [session_id, session_id, limit])
+        patterns = await db.execute_query(patterns_query, [min_time, max_time, limit])
         result["patterns"] = patterns or []
         result["pattern_count"] = len(patterns) if patterns else 0
 
@@ -319,6 +380,10 @@ async def get_recent_sessions(
     """
     Get recent sessions with memory counts for review selection.
 
+    Uses two strategies and merges results:
+    1. Sessions from session_state table (with memory counts via time-window matching)
+    2. Sessions derived from memories table (when memories have session_ids)
+
     Args:
         db: Database service instance
         project_path: Optional filter by project
@@ -327,40 +392,162 @@ async def get_recent_sessions(
     Returns:
         Dict with session list
     """
-    query = """
+    seen_session_ids = set()
+    all_sessions = []
+
+    # Strategy 1: Get sessions from session_state table
+    # Filter out JSON blob rows (session_id starts with '{') which are state dumps
+    state_query = """
+        SELECT
+            s.session_id,
+            s.project_path,
+            s.current_goal,
+            s.created_at as started_at,
+            s.updated_at as ended_at
+        FROM session_state s
+        WHERE s.session_id NOT LIKE '{%}'
+    """
+    state_params = []
+
+    if project_path:
+        state_query += " AND s.project_path = ?"
+        state_params.append(project_path)
+
+    state_query += """
+        ORDER BY COALESCE(s.updated_at, s.created_at) DESC
+        LIMIT ?
+    """
+    state_params.append(limit * 2)  # Fetch extra to account for filtering
+
+    state_sessions = await db.execute_query(state_query, state_params)
+
+    for ss in (state_sessions or []):
+        sid = ss.get("session_id")
+        if not sid or sid in seen_session_ids:
+            continue
+
+        started_at = ss.get("started_at")
+        ended_at = ss.get("ended_at") or started_at
+        sess_project = ss.get("project_path")
+
+        # Count memories in this session's time window
+        count_query = """
+            SELECT
+                COUNT(*) as memory_count,
+                SUM(CASE WHEN outcome_status = 'success' THEN 1 ELSE 0 END) as success_count,
+                SUM(CASE WHEN outcome_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+                SUM(CASE WHEN outcome_status = 'pending' OR outcome_status IS NULL THEN 1 ELSE 0 END) as pending_count,
+                AVG(confidence) as avg_confidence,
+                MAX(project_path) as project_path,
+                MAX(project_name) as project_name
+            FROM memories
+            WHERE created_at >= ?
+            AND created_at <= ?
+        """
+        count_params = [started_at, ended_at]
+
+        if sess_project:
+            count_query += " AND project_path = ?"
+            count_params.append(sess_project)
+
+        counts = await db.execute_query(count_query, count_params)
+        count_row = counts[0] if counts else {}
+
+        memory_count = count_row.get("memory_count", 0) or 0
+
+        # Also check if any memories reference this session_id directly
+        direct_count_result = await db.execute_query(
+            "SELECT COUNT(*) as cnt FROM memories WHERE session_id = ?",
+            [sid]
+        )
+        direct_count = (direct_count_result[0].get("cnt", 0) if direct_count_result else 0) or 0
+        memory_count = max(memory_count, direct_count)
+
+        session_entry = {
+            "session_id": sid,
+            "memory_count": memory_count,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "project_path": count_row.get("project_path") or sess_project,
+            "project_name": count_row.get("project_name"),
+            "current_goal": ss.get("current_goal"),
+            "success_count": count_row.get("success_count", 0) or 0,
+            "failed_count": count_row.get("failed_count", 0) or 0,
+            "pending_count": count_row.get("pending_count", 0) or 0,
+            "avg_confidence": count_row.get("avg_confidence", 0.5) or 0.5,
+            "source": "session_state"
+        }
+
+        all_sessions.append(session_entry)
+        seen_session_ids.add(sid)
+
+    # Strategy 2: Also get sessions derived from memories table
+    # (for when memories have explicit session_ids not in session_state)
+    mem_query = """
         SELECT
             session_id,
             COUNT(*) as memory_count,
             MIN(created_at) as started_at,
             MAX(created_at) as ended_at,
-            project_path,
-            project_name,
+            MAX(project_path) as project_path,
+            MAX(project_name) as project_name,
             SUM(CASE WHEN outcome_status = 'success' THEN 1 ELSE 0 END) as success_count,
             SUM(CASE WHEN outcome_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
-            SUM(CASE WHEN outcome_status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+            SUM(CASE WHEN outcome_status = 'pending' OR outcome_status IS NULL THEN 1 ELSE 0 END) as pending_count,
             AVG(confidence) as avg_confidence
         FROM memories
         WHERE session_id IS NOT NULL
+        AND session_id != ''
     """
-    params = []
+    mem_params = []
 
     if project_path:
-        query += " AND project_path = ?"
-        params.append(project_path)
+        mem_query += " AND project_path = ?"
+        mem_params.append(project_path)
 
-    query += """
+    mem_query += """
         GROUP BY session_id
         ORDER BY MAX(created_at) DESC
         LIMIT ?
     """
-    params.append(limit)
+    mem_params.append(limit)
 
-    sessions = await db.execute_query(query, params)
+    mem_sessions = await db.execute_query(mem_query, mem_params)
+
+    for ms in (mem_sessions or []):
+        sid = ms.get("session_id")
+        if not sid or sid in seen_session_ids:
+            continue
+
+        session_entry = {
+            "session_id": sid,
+            "memory_count": ms.get("memory_count", 0) or 0,
+            "started_at": ms.get("started_at"),
+            "ended_at": ms.get("ended_at"),
+            "project_path": ms.get("project_path"),
+            "project_name": ms.get("project_name"),
+            "current_goal": None,
+            "success_count": ms.get("success_count", 0) or 0,
+            "failed_count": ms.get("failed_count", 0) or 0,
+            "pending_count": ms.get("pending_count", 0) or 0,
+            "avg_confidence": ms.get("avg_confidence", 0.5) or 0.5,
+            "source": "memories"
+        }
+
+        all_sessions.append(session_entry)
+        seen_session_ids.add(sid)
+
+    # Sort by most recent activity and apply limit
+    all_sessions.sort(
+        key=lambda s: s.get("ended_at") or s.get("started_at") or "",
+        reverse=True
+    )
+    all_sessions = all_sessions[:limit]
 
     return {
         "success": True,
-        "sessions": sessions or [],
-        "count": len(sessions) if sessions else 0
+        "sessions": all_sessions,
+        "count": len(all_sessions)
     }
 
 

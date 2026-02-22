@@ -32,6 +32,7 @@ import httpx
 
 MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
 API_KEY = os.getenv("MEMORY_API_KEY", "")
+SESSION_ID = os.getenv("CLAUDE_SESSION_ID", "")
 
 
 async def call_memory_skill(skill_id: str, params: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -65,9 +66,64 @@ async def call_memory_skill(skill_id: str, params: Dict[str, Any]) -> Optional[D
     return None
 
 
+async def call_rest_api(method: str, path: str, json_body: dict = None, params: dict = None) -> Optional[Dict[str, Any]]:
+    """Call the memory agent REST API."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            url = f"{MEMORY_AGENT_URL}{path}"
+            if method == "POST":
+                response = await client.post(url, json=json_body)
+            else:
+                response = await client.get(url, params=params)
+            if response.status_code == 200:
+                return response.json()
+    except Exception:
+        pass
+    return None
+
+
 async def load_session_context(project_path: str) -> str:
     """Load all relevant context for a session start."""
     context_parts = []
+
+    # ============================================================
+    # CROSS-SESSION AWARENESS: Register this session + catch-up
+    # ============================================================
+    session_id = SESSION_ID or os.getenv("CLAUDE_SESSION_ID", "")
+    if session_id:
+        register_result = await call_rest_api("POST", "/api/sessions/register", {
+            "session_id": session_id,
+            "project_path": project_path,
+        })
+
+        if register_result and register_result.get("active_siblings"):
+            siblings = register_result["active_siblings"]
+            context_parts.append("\n## Active Parallel Sessions")
+            for sib in siblings:
+                label = sib.get("session_label") or sib.get("session_id", "")[:12]
+                goal = sib.get("current_goal", "unknown")
+                files = sib.get("files_modified", [])
+                context_parts.append(f"- **{label}**: {goal}")
+                if files:
+                    context_parts.append(f"  Files: {', '.join(files[:5])}")
+
+        # Get catch-up: what happened while this session was away
+        catchup = await call_rest_api("GET", "/api/sessions/catch-up", params={
+            "session_id": session_id,
+            "project_path": project_path,
+        })
+
+        if catchup and catchup.get("sessions"):
+            context_parts.append("\n## What Happened While You Were Away")
+            for sess in catchup["sessions"]:
+                label = sess.get("session_label") or sess.get("session_id", "")[:12]
+                events = sess.get("events", [])
+                if events:
+                    context_parts.append(f"### Session: {label}")
+                    for ev in events[:5]:
+                        etype = ev.get("event_type", "")
+                        summary = ev.get("summary", "")
+                        context_parts.append(f"- [{etype}] {summary}")
 
     # ============================================================
     # MOLTBOT-INSPIRED: Load MEMORY.md first (core facts)

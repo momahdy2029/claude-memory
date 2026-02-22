@@ -26,5 +26,40 @@
       "Bash(wmic process where \"name=''python3.12.exe''\" delete)",
       "Bash(wmic process where \"name like ''python%''\" delete)"
     ]
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"D:\\Desktop-Projects\\Claude Memory\\memory-agent\\hooks\\pre_compact_hook.py\""
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"D:\\Desktop-Projects\\Claude Memory\\memory-agent\\hooks\\session_end_hook.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"D:\\Desktop-Projects\\Claude Memory\\memory-agent\\hooks\\stop_hook.py\""
+          }
+        ]
+      }
+    ]
   }
 }

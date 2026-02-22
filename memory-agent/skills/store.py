@@ -2,7 +2,7 @@
 import logging
 from typing import Dict, Any, Optional, List
 from services.database import DatabaseService
-from services.embeddings import EmbeddingService
+from services.embeddings import EmbeddingService, EmbeddingError
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,14 @@ async def _auto_infer_relationships(
     relationships_created = []
     content_lower = content.lower()
 
+    # Generate embedding once for all similarity-based detections
+    cached_embedding = None
+    if embeddings:
+        try:
+            cached_embedding = await embeddings.generate_embedding(content)
+        except Exception as e:
+            logger.debug(f"Embedding generation for relationship inference failed: {e}")
+
     # 1. Fix Detection: If this is a successful decision/code after a recent error
     if outcome == 'success' and memory_type in ['decision', 'code']:
         if session_id:
@@ -65,11 +73,10 @@ async def _auto_infer_relationships(
     # 2. Causal Keyword Detection
     causal_keywords = ['because', 'due to', 'caused by', 'result of', 'since']
     if any(kw in content_lower for kw in causal_keywords):
-        if embeddings:
+        if cached_embedding is not None:
             try:
-                embedding = await embeddings.generate_embedding(content)
                 similar = await db.search_similar(
-                    embedding, limit=3, threshold=0.7, project_path=project_path
+                    cached_embedding, limit=3, threshold=0.7, project_path=project_path
                 )
                 for mem in similar:
                     if mem['id'] != memory_id:
@@ -84,11 +91,10 @@ async def _auto_infer_relationships(
     # 3. Support Detection
     support_keywords = ['supports', 'evidence for', 'proves', 'confirms', 'validates']
     if any(kw in content_lower for kw in support_keywords):
-        if embeddings:
+        if cached_embedding is not None:
             try:
-                embedding = await embeddings.generate_embedding(content)
                 similar = await db.search_similar(
-                    embedding, limit=2, threshold=0.75, project_path=project_path
+                    cached_embedding, limit=2, threshold=0.75, project_path=project_path
                 )
                 for mem in similar:
                     if mem['id'] != memory_id:
@@ -103,11 +109,10 @@ async def _auto_infer_relationships(
     # 4. Contradiction Detection
     contradiction_keywords = ['but actually', 'wrong', 'incorrect', 'not true', 'instead', 'actually']
     if any(kw in content_lower for kw in contradiction_keywords):
-        if embeddings:
+        if cached_embedding is not None:
             try:
-                embedding = await embeddings.generate_embedding(content)
                 similar = await db.search_similar(
-                    embedding, limit=2, threshold=0.8, project_path=project_path
+                    cached_embedding, limit=2, threshold=0.8, project_path=project_path
                 )
                 for mem in similar:
                     if mem['id'] != memory_id:
@@ -122,9 +127,8 @@ async def _auto_infer_relationships(
     # 5. Temporal Proximity: Link to recent memories in same session
     if session_id:
         try:
-            # Get recent memories from same session (any type)
             recent = await db.get_memories_by_type(
-                memory_type=memory_type,  # Same type for relevance
+                memory_type=memory_type,
                 session_id=session_id,
                 limit=3
             )
@@ -139,11 +143,10 @@ async def _auto_infer_relationships(
             logger.debug(f"Temporal proximity detection failed: {e}")
 
     # 6. High Semantic Similarity: Strong related link
-    if embeddings:
+    if cached_embedding is not None:
         try:
-            embedding = await embeddings.generate_embedding(content)
             very_similar = await db.search_similar(
-                embedding, limit=2, threshold=0.85, project_path=project_path
+                cached_embedding, limit=2, threshold=0.85, project_path=project_path
             )
             for mem in very_similar:
                 if mem['id'] != memory_id:
@@ -232,8 +235,89 @@ async def store_memory(
     Returns:
         Dict with stored memory ID and status
     """
-    # Generate embedding for the content
-    embedding = await embeddings.generate_embedding(content)
+    # Consolidate legacy outcome/success into outcome_status
+    # If caller uses legacy params, derive outcome_status from them
+    if outcome_status == 'pending':
+        if success is True:
+            outcome_status = 'success'
+        elif success is False:
+            outcome_status = 'failed'
+        elif outcome and isinstance(outcome, str):
+            # Map common outcome text values
+            outcome_lower = outcome.lower().strip()
+            if outcome_lower in ('success', 'worked', 'fixed', 'resolved'):
+                outcome_status = 'success'
+            elif outcome_lower in ('failed', 'broken', 'error'):
+                outcome_status = 'failed'
+            elif outcome_lower in ('partial', 'partially'):
+                outcome_status = 'partial'
+
+    # Generate embedding for the content with status tracking
+    embed_result = await embeddings.generate_embedding_with_status(content)
+    embedding = embed_result.embedding
+
+    if not embed_result.ok:
+        logger.warning(
+            f"Embedding failed ({embed_result.error.value}): {embed_result.error_message}. "
+            f"Memory will be stored without embedding (not semantically searchable)."
+        )
+
+    # === Dedup check: find near-duplicates before storing ===
+    link_to_id = None  # Set if we find a near-duplicate to link after storing
+    if embedding:
+        try:
+            duplicates = await db.find_similar_for_dedup(
+                embedding=embedding,
+                project_path=project_path,
+                threshold=0.92,
+                limit=3
+            )
+            if duplicates:
+                best_match = duplicates[0]
+                if best_match['similarity'] >= 0.95:
+                    # Very high similarity - merge into existing memory
+                    # Keeps longer content, higher importance/confidence
+                    updated_id = await db.merge_memory(
+                        existing_id=best_match['id'],
+                        new_content=content,
+                        new_importance=importance,
+                        new_confidence=confidence
+                    )
+                    logger.info(
+                        f"Dedup: merged with memory #{best_match['id']} "
+                        f"(similarity: {best_match['similarity']:.3f})"
+                    )
+                    return {
+                        "success": True,
+                        "memory_id": updated_id,
+                        "action": "merged",
+                        "merged_with": best_match['id'],
+                        "similarity": best_match['similarity'],
+                        "type": memory_type,
+                        "importance": importance,
+                        "confidence": confidence,
+                        "outcome_status": outcome_status,
+                        "project": project_path,
+                        "relationships_created": [],
+                        "message": (
+                            f"Merged with existing memory #{best_match['id']} "
+                            f"(similarity: {best_match['similarity']:.2f})"
+                        )
+                    }
+                elif best_match['similarity'] >= 0.92:
+                    # High similarity but not identical - store new but link as related
+                    # We'll create the relationship after storing below
+                    link_to_id = best_match['id']
+                    link_similarity = best_match['similarity']
+                    logger.info(
+                        f"Dedup: will link to memory #{link_to_id} "
+                        f"(similarity: {link_similarity:.3f})"
+                    )
+        except Exception as e:
+            # Dedup is best-effort; never block a store operation
+            logger.warning(f"Dedup check failed (non-fatal): {e}")
+            link_to_id = None
+    # === End dedup check ===
 
     # Store in database with full context
     memory_id = await db.store_memory(
@@ -280,7 +364,21 @@ async def store_memory(
         logger.warning(f"Failed to auto-infer relationships: {e}")
         # Don't fail the store operation if relationship inference fails
 
-    return {
+    # If dedup found a near-duplicate (0.92-0.95 range), link as related
+    dedup_linked = False
+    if link_to_id is not None:
+        try:
+            result = await db.create_relationship(
+                memory_id, link_to_id, 'related', strength=0.9
+            )
+            if result.get('success'):
+                relationships_created.append(f"near-duplicate of #{link_to_id}")
+                dedup_linked = True
+                logger.info(f"Dedup: linked memory #{memory_id} to near-duplicate #{link_to_id}")
+        except Exception as e:
+            logger.warning(f"Failed to create dedup relationship: {e}")
+
+    response = {
         "success": True,
         "memory_id": memory_id,
         "type": memory_type,
@@ -289,8 +387,17 @@ async def store_memory(
         "outcome_status": outcome_status,
         "project": project_path,
         "relationships_created": relationships_created,
+        "has_embedding": embedding is not None,
         "message": f"Memory stored successfully with ID {memory_id}"
     }
+    if not embed_result.ok:
+        response["embedding_error"] = embed_result.error.value
+        response["embedding_error_detail"] = embed_result.error_message
+    if dedup_linked:
+        response["action"] = "stored_and_linked"
+        response["linked_to"] = link_to_id
+
+    return response
 
 
 async def store_project(

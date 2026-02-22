@@ -36,7 +36,8 @@ DEFAULT_CONFIG = {
     "HOST": "0.0.0.0",
     "MEMORY_AGENT_URL": "http://localhost:8102",
     "OLLAMA_HOST": "http://localhost:11434",
-    "EMBEDDING_MODEL": "nomic-embed-text",
+    "EMBEDDING_MODEL": "Alibaba-NLP/gte-large-en-v1.5",
+    "EMBEDDING_PROVIDER": "sentence-transformers",
     "LOG_LEVEL": "INFO",
     "USE_VECTOR_INDEX": "true",
     "DB_POOL_SIZE": "5",
@@ -47,12 +48,7 @@ DEFAULT_CONFIG = {
 # Claude Code settings paths
 def get_claude_settings_dir() -> Path:
     """Get the Claude Code settings directory."""
-    if sys.platform == "win32":
-        return Path.home() / ".claude"
-    elif sys.platform == "darwin":
-        return Path.home() / ".claude"
-    else:  # Linux
-        return Path.home() / ".claude"
+    return Path.home() / ".claude"
 
 def get_claude_settings_file() -> Path:
     """Get the Claude Code settings.json file path."""
@@ -95,10 +91,15 @@ def print_error(text: str):
 
 
 def prompt_yes_no(question: str, default: bool = True) -> bool:
-    """Prompt for yes/no answer."""
+    """Prompt for yes/no answer. Returns default if stdin is not a TTY or EOF."""
+    if not sys.stdin.isatty():
+        return default
     suffix = " [Y/n]: " if default else " [y/N]: "
     while True:
-        answer = input(question + suffix).strip().lower()
+        try:
+            answer = input(question + suffix).strip().lower()
+        except EOFError:
+            return default
         if not answer:
             return default
         if answer in ("y", "yes"):
@@ -109,8 +110,13 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
 
 
 def prompt_value(question: str, default: str) -> str:
-    """Prompt for a value with a default."""
-    answer = input(f"{question} [{default}]: ").strip()
+    """Prompt for a value with a default. Returns default if stdin is not a TTY or EOF."""
+    if not sys.stdin.isatty():
+        return default
+    try:
+        answer = input(f"{question} [{default}]: ").strip()
+    except EOFError:
+        return default
     return answer if answer else default
 
 
@@ -280,17 +286,18 @@ def check_ollama() -> bool:
     print_warning("Ollama not detected")
     print("")
     print("  " + "="*56)
-    print("  OLLAMA REQUIRED FOR SEMANTIC SEARCH")
+    print("  OLLAMA (OPTIONAL)")
     print("  " + "="*56)
     print("")
-    print("  The memory agent needs Ollama for embeddings.")
-    print("  Without it, semantic search will not work.")
+    print("  Ollama is optional. The default provider (sentence-transformers)")
+    print("  runs locally without Ollama. Install Ollama only if you prefer")
+    print("  the Ollama provider.")
     print("")
-    print("  To install Ollama:")
+    print("  To install Ollama (if desired):")
     print("    1. Download from: https://ollama.ai/download")
     print("    2. Install and run: ollama pull nomic-embed-text")
     print("    3. Start Ollama: ollama serve")
-    print("    4. Re-run this installer")
+    print("    4. Set EMBEDDING_PROVIDER=ollama in .env")
     print("")
     return False
 
@@ -357,9 +364,12 @@ def create_env_file(config: Dict[str, str], force: bool = False) -> bool:
         f"PORT={config['PORT']}",
         f"MEMORY_AGENT_URL={config['MEMORY_AGENT_URL']}",
         "",
-        "# Ollama Configuration",
-        f"OLLAMA_HOST={config['OLLAMA_HOST']}",
+        "# Embedding Configuration",
+        f"EMBEDDING_PROVIDER={config.get('EMBEDDING_PROVIDER', 'sentence-transformers')}",
         f"EMBEDDING_MODEL={config['EMBEDDING_MODEL']}",
+        "",
+        "# Ollama Configuration (only needed if EMBEDDING_PROVIDER=ollama)",
+        f"OLLAMA_HOST={config['OLLAMA_HOST']}",
         "",
         "# Database Configuration",
         f"DATABASE_PATH={AGENT_DIR / 'memories.db'}",
@@ -452,10 +462,9 @@ echo "Memory Agent started (PID: $!)"
         return False
 
 
-def configure_claude_mcp(config: Dict[str, str]) -> bool:
-    """Configure Claude Code MCP settings."""
-    settings_file = get_claude_settings_file()
-    settings_dir = get_claude_settings_dir()
+def _write_mcp_settings(settings_file: Path, config: Dict[str, str]) -> bool:
+    """Write MCP settings to a given settings file."""
+    settings_dir = settings_file.parent
 
     # Ensure settings directory exists
     settings_dir.mkdir(parents=True, exist_ok=True)
@@ -465,7 +474,7 @@ def configure_claude_mcp(config: Dict[str, str]) -> bool:
         try:
             settings = json.loads(settings_file.read_text())
         except json.JSONDecodeError:
-            print_warning("Existing settings.json is invalid, creating backup")
+            print_warning(f"Existing {settings_file.name} is invalid, creating backup")
             shutil.copy(settings_file, settings_file.with_suffix(".json.bak"))
             settings = {}
     else:
@@ -478,7 +487,7 @@ def configure_claude_mcp(config: Dict[str, str]) -> bool:
     # Add/update claude-memory server configuration
     settings["mcpServers"]["claude-memory"] = {
         "command": sys.executable,
-        "args": [str(AGENT_DIR / "main.py")],
+        "args": [str(AGENT_DIR / "mcp_server.py")],
         "env": {
             "MEMORY_AGENT_URL": config["MEMORY_AGENT_URL"],
             "PORT": config["PORT"],
@@ -492,6 +501,35 @@ def configure_claude_mcp(config: Dict[str, str]) -> bool:
     except Exception as e:
         print_error(f"Failed to configure MCP settings: {e}")
         return False
+
+
+def configure_claude_mcp(config: Dict[str, str], scope: str = "global", project_path: Optional[str] = None) -> bool:
+    """Configure Claude Code MCP settings.
+
+    Args:
+        config: Configuration dictionary with PORT, MEMORY_AGENT_URL, etc.
+        scope: Installation scope - 'global', 'project', or 'both'.
+        project_path: Project directory path for project-specific installation.
+    """
+    success = True
+
+    if scope in ("global", "both"):
+        settings_file = get_claude_settings_file()
+        if not _write_mcp_settings(settings_file, config):
+            success = False
+
+    if scope in ("project", "both"):
+        if project_path:
+            project_settings_dir = Path(project_path) / ".claude"
+            project_settings_file = project_settings_dir / "settings.local.json"
+            if not _write_mcp_settings(project_settings_file, config):
+                success = False
+        else:
+            print_warning("Project path not specified, skipping project-level MCP settings")
+            if scope == "project":
+                success = False
+
+    return success
 
 
 def setup_hooks(config: Dict[str, str]) -> bool:
@@ -535,7 +573,7 @@ def setup_hooks(config: Dict[str, str]) -> bool:
     return True
 
 
-def configure_hooks_json() -> bool:
+def configure_hooks_json(auto: bool = False) -> bool:
     """Configure hooks.json to enable the hooks."""
     hooks_file = get_claude_settings_dir() / "hooks.json"
 
@@ -568,8 +606,9 @@ def configure_hooks_json() -> bool:
     if hooks_file.exists():
         try:
             existing = json.loads(hooks_file.read_text())
-            # Don't overwrite if user has customized
-            if prompt_yes_no("hooks.json exists. Update with memory agent hooks?", default=True):
+            # In auto mode, always merge; otherwise ask
+            should_update = auto or prompt_yes_no("hooks.json exists. Update with memory agent hooks?", default=True)
+            if should_update:
                 if "hooks" not in existing:
                     existing["hooks"] = {}
                 existing["hooks"].update(hooks_config["hooks"])
@@ -679,9 +718,10 @@ def print_post_install_instructions(config: Dict[str, str]):
 
     print("Next steps:")
     print("")
-    print("1. Make sure Ollama is running with the embedding model:")
-    print(f"   ollama pull {config['EMBEDDING_MODEL']}")
+    print("1. (Optional) If using Ollama provider, make sure Ollama is running:")
+    print(f"   ollama pull nomic-embed-text")
     print(f"   ollama serve")
+    print(f"   Then set EMBEDDING_PROVIDER=ollama in .env")
     print("")
     print("2. Start the Memory Agent:")
     print(f"   cd \"{AGENT_DIR}\"")
@@ -770,6 +810,28 @@ def main():
         action="store_true",
         help="Skip Claude Code installation check (for standalone use)"
     )
+    parser.add_argument(
+        "--skip-env",
+        action="store_true",
+        help="Skip .env file creation (already created by Node.js wizard)"
+    )
+    parser.add_argument(
+        "--scope",
+        choices=["global", "project", "both"],
+        default="global",
+        help="Installation scope for Claude Code settings"
+    )
+    parser.add_argument(
+        "--project-path",
+        type=str,
+        default=None,
+        help="Project path for project-specific installation"
+    )
+    parser.add_argument(
+        "--no-start",
+        action="store_true",
+        help="Don't auto-start the agent after installation"
+    )
 
     args = parser.parse_args()
 
@@ -810,7 +872,7 @@ def main():
                     if not install_claude_code():
                         print_error("Could not install Claude Code automatically.")
                         print("Please install manually: npm install -g @anthropic-ai/claude-code")
-                        if not prompt_yes_no("Continue anyway (memory agent only)?", default=False):
+                        if not args.auto and not prompt_yes_no("Continue anyway (memory agent only)?", default=False):
                             return 1
                     else:
                         claude_ok = True
@@ -841,7 +903,7 @@ def main():
                 config["OLLAMA_HOST"]
             )
 
-        if prompt_yes_no("Use default embedding model (nomic-embed-text)?"):
+        if prompt_yes_no("Use default embedding model (gte-large-en-v1.5 via sentence-transformers)?"):
             pass
         else:
             config["EMBEDDING_MODEL"] = prompt_value(
@@ -861,8 +923,11 @@ def main():
 
     # Step 4: Create .env file
     print_step(4, total_steps, "Creating configuration file...")
-    if not create_env_file(config, force=args.auto):
-        return 1
+    if not args.skip_env:
+        if not create_env_file(config, force=args.auto):
+            return 1
+    else:
+        print_success("Skipped .env creation (--skip-env)")
 
     # Step 5: Fix hardcoded values
     print_step(5, total_steps, "Fixing hardcoded values...")
@@ -879,11 +944,11 @@ def main():
 
     if claude_ok:
         if args.auto or prompt_yes_no("Configure Claude Code MCP settings?"):
-            configure_claude_mcp(config)
+            configure_claude_mcp(config, scope=args.scope, project_path=args.project_path)
 
         if args.auto or prompt_yes_no("Install Claude Code hooks?"):
             setup_hooks(config)
-            configure_hooks_json()
+            configure_hooks_json(auto=args.auto)
     else:
         print_warning("Skipping Claude Code configuration (Claude Code not installed)")
         print("  Run 'python install.py' again after installing Claude Code")
@@ -892,9 +957,11 @@ def main():
     print_step(8, total_steps, "Verifying installation...")
     verify_installation()
 
-    # Step 9: Auto-start agent if Ollama is ready
+    # Step 9: Auto-start agent
     print_step(9, total_steps, "Starting Memory Agent...")
-    if ollama_ok:
+    if args.no_start:
+        print_success("Skipped auto-start (--no-start)")
+    else:
         try:
             subprocess.run(
                 [sys.executable, str(AGENT_DIR / "memory-agent"), "start"],
@@ -904,10 +971,7 @@ def main():
             print_success("Memory Agent started!")
         except Exception as e:
             print_warning(f"Could not auto-start agent: {e}")
-            print("  Start manually with: claude-memory-agent start")
-    else:
-        print_warning("Skipping auto-start (Ollama not running)")
-        print("  After installing Ollama, run: claude-memory-agent start")
+            print("  Start manually with: python main.py")
 
     # Done!
     print_post_install_instructions(config)

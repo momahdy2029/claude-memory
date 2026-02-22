@@ -104,7 +104,7 @@ class SQLiteConnectionPool:
             self.db_path,
             timeout=self.timeout,
             check_same_thread=False,
-            isolation_level=None  # Autocommit mode for better concurrency
+            isolation_level="DEFERRED"  # Use DEFERRED transactions for safety
         )
         conn.row_factory = sqlite3.Row
         # Enable WAL mode for better concurrent read/write performance
@@ -323,6 +323,37 @@ class DatabaseService:
             # Fallback for backward compatibility
             yield self.conn
 
+    @contextmanager
+    def transaction(self, conn=None):
+        """Context manager for transactional database operations.
+
+        Wraps a block in BEGIN/COMMIT with automatic ROLLBACK on error.
+        Prevents partial state corruption during multi-step operations.
+
+        Usage:
+            with self.transaction() as conn:
+                cursor = conn.cursor()
+                cursor.execute("INSERT ...")
+                cursor.execute("UPDATE ...")
+                # auto-committed on success, rolled back on exception
+
+        Args:
+            conn: Optional connection to use. If None, uses self.conn.
+        """
+        use_conn = conn or self.conn
+        if use_conn is None:
+            raise ConnectionPoolError("No database connection available")
+        try:
+            use_conn.execute("BEGIN")
+            yield use_conn
+            use_conn.execute("COMMIT")
+        except Exception:
+            try:
+                use_conn.execute("ROLLBACK")
+            except Exception as rollback_err:
+                logger.error(f"Rollback failed: {rollback_err}")
+            raise
+
     async def connect(self):
         """Establish database connection and initialize connection pool."""
         try:
@@ -333,10 +364,15 @@ class DatabaseService:
                 timeout=DB_TIMEOUT
             )
             # Keep a primary connection for backward compatibility
-            self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            self.conn = sqlite3.connect(
+                self.db_path,
+                check_same_thread=False,
+                isolation_level="DEFERRED"
+            )
             self.conn.row_factory = sqlite3.Row
             # Enable WAL mode on primary connection too
             self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.execute("PRAGMA busy_timeout=30000")
             logger.info(f"Database connected with pool size {DB_POOL_SIZE}")
         except sqlite3.Error as e:
@@ -567,6 +603,7 @@ class DatabaseService:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_success ON memories(success)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_outcome_status ON memories(outcome_status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_problem ON patterns(problem_type)")
 
         # Migration helper function
@@ -634,6 +671,66 @@ class DatabaseService:
         safe_add_column("memories", "worked_in", "TEXT")  # JSON array of contexts where solution worked
         safe_add_column("memories", "failed_in", "TEXT")  # JSON array of contexts where solution failed
         safe_add_column("memories", "context_confidence", "REAL")  # Context-specific confidence score
+
+        # Migration: Add CLaRa-inspired tier columns (v2.4.0)
+        # Hierarchical memory tiers: hot (fast access), warm (compressed), cold (archive)
+        safe_add_column("memories", "tier", "TEXT DEFAULT 'hot'")
+        safe_add_column("memories", "tier_changed_at", "TEXT")
+        safe_add_column("memories", "compressed_content", "TEXT")  # Compressed version for warm tier
+
+        # Tier index for fast filtering
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier)")
+
+        # Migration: Consolidate legacy outcome/success into outcome_status (v2.5.0)
+        # Maps: success=1 -> 'success', success=0 -> 'failed', outcome text -> outcome_status
+        # Only updates rows that still have outcome_status='pending' and have legacy data
+        try:
+            cursor.execute("""
+                UPDATE memories
+                SET outcome_status = 'success'
+                WHERE outcome_status = 'pending'
+                  AND success = 1
+                  AND outcome_status != 'success'
+            """)
+            cursor.execute("""
+                UPDATE memories
+                SET outcome_status = 'failed'
+                WHERE outcome_status = 'pending'
+                  AND success = 0
+                  AND outcome_status != 'failed'
+            """)
+            rows_migrated = cursor.rowcount
+            if rows_migrated > 0:
+                logger.info(f"Migration: Consolidated {rows_migrated} legacy success values into outcome_status")
+        except Exception as e:
+            logger.debug(f"Legacy outcome consolidation skipped: {e}")
+
+        # Memory archive table for consolidation (v2.4.0)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS memory_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                original_id INTEGER,
+                type TEXT,
+                content TEXT,
+                embedding TEXT,
+                project_path TEXT,
+                session_id TEXT,
+                importance INTEGER,
+                access_count INTEGER,
+                decay_factor REAL,
+                metadata TEXT,
+                archive_reason TEXT,
+                relevance_score_at_archive REAL,
+                consolidated_into INTEGER,
+                archived_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        # Migration: ensure memory_archive has consolidation column (v2.4.0)
+        # Older schema may lack this column
+        safe_add_column("memory_archive", "consolidated_into", "INTEGER")
+
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_archive_original ON memory_archive(original_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_archive_consolidated ON memory_archive(consolidated_into)")
 
         # ============================================================
         # SESSION TIMELINE TABLES (Anti-Hallucination Layer)
@@ -890,32 +987,6 @@ class DatabaseService:
         # MEMORY CLEANUP AND ARCHIVAL TABLES
         # ============================================================
 
-        # Archived memories (soft-deleted for recovery)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS memory_archive (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                original_id INTEGER NOT NULL,
-
-                -- Original memory data
-                type TEXT NOT NULL,
-                content TEXT NOT NULL,
-                embedding TEXT,
-                project_path TEXT,
-                session_id TEXT,
-                importance INTEGER,
-                access_count INTEGER,
-                decay_factor REAL,
-                metadata TEXT,
-
-                -- Archive metadata
-                archive_reason TEXT NOT NULL,
-                archived_at TEXT DEFAULT (datetime('now')),
-                archived_by TEXT,
-                relevance_score_at_archive REAL,
-                expires_at TEXT
-            )
-        """)
-
         # Cleanup configuration per project
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS cleanup_config (
@@ -1122,13 +1193,74 @@ class DatabaseService:
         # Migration: Add last_flush_at column to session_state if it doesn't exist
         safe_add_column("session_state", "last_flush_at", "TEXT")
 
+        # ============================================================
+        # CROSS-SESSION AWARENESS TABLES
+        # ============================================================
+
+        # Active sessions - tracks currently running Claude Code sessions
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS active_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                project_path TEXT NOT NULL,
+                start_time TEXT DEFAULT (datetime('now')),
+                last_heartbeat TEXT DEFAULT (datetime('now')),
+                current_goal TEXT,
+                status TEXT DEFAULT 'active' CHECK(status IN ('active','idle','completed')),
+                files_modified TEXT DEFAULT '[]',
+                key_decisions TEXT DEFAULT '[]',
+                brief_summary TEXT DEFAULT '',
+                session_label TEXT
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_active_sessions_project ON active_sessions(project_path, status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_active_sessions_heartbeat ON active_sessions(last_heartbeat)")
+
+        # Session activity feed - cross-session event stream
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_activity (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK(event_type IN (
+                    'file_change','decision','error_fix','goal_change','session_start','session_end'
+                )),
+                summary TEXT NOT NULL,
+                files TEXT DEFAULT '[]',
+                timestamp TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_activity_project ON session_activity(project_path, timestamp DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_activity_session ON session_activity(session_id, timestamp DESC)")
+
         self.conn.commit()
 
     def _serialize_embedding(self, embedding: List[float]) -> str:
-        return json.dumps(embedding)
+        """Serialize embedding to binary format (base64-encoded struct pack).
+
+        Uses 'b64:' prefix to distinguish from legacy JSON format.
+        ~30-35% smaller than JSON serialization.
+        """
+        import struct
+        import base64
+        packed = struct.pack(f'{len(embedding)}f', *embedding)
+        return 'b64:' + base64.b64encode(packed).decode('ascii')
 
     def _deserialize_embedding(self, embedding_str: str) -> List[float]:
-        return json.loads(embedding_str) if embedding_str else []
+        """Deserialize embedding from binary or JSON format.
+
+        Auto-detects format: 'b64:' prefix = binary, otherwise JSON.
+        Backward compatible with existing JSON-serialized embeddings.
+        """
+        if not embedding_str:
+            return []
+        if embedding_str.startswith('b64:'):
+            import struct
+            import base64
+            raw = base64.b64decode(embedding_str[4:])
+            count = len(raw) // 4  # 4 bytes per float32
+            return list(struct.unpack(f'{count}f', raw))
+        return json.loads(embedding_str)
 
     def _cosine_similarity(self, vec1: List[float], vec2: List[float]) -> float:
         a = np.array(vec1)
@@ -1192,6 +1324,59 @@ class DatabaseService:
         score = base * recency_factor * access_factor * decay_factor
 
         return round(score, 4)
+
+    async def migrate_embeddings_to_binary(self, batch_size: int = 100) -> Dict[str, int]:
+        """Migrate existing JSON-serialized embeddings to binary format.
+
+        Processes in batches to avoid lock contention. Safe to run multiple times.
+
+        Returns:
+            Dict with 'migrated', 'skipped', 'errors' counts.
+        """
+        import struct
+        import base64
+        cursor = self.conn.cursor()
+        migrated = 0
+        skipped = 0
+        errors = 0
+
+        for table in ['memories', 'patterns', 'timeline_events']:
+            try:
+                cursor.execute(f"SELECT id, embedding FROM {table} WHERE embedding IS NOT NULL")
+            except Exception:
+                continue
+
+            batch = []
+            for row in cursor.fetchall():
+                emb_str = row['embedding']
+                if not emb_str or emb_str.startswith('b64:'):
+                    skipped += 1
+                    continue
+                try:
+                    floats = json.loads(emb_str)
+                    packed = struct.pack(f'{len(floats)}f', *floats)
+                    new_val = 'b64:' + base64.b64encode(packed).decode('ascii')
+                    batch.append((new_val, row['id']))
+                except Exception:
+                    errors += 1
+                    continue
+
+                if len(batch) >= batch_size:
+                    cursor.executemany(
+                        f"UPDATE {table} SET embedding = ? WHERE id = ?", batch
+                    )
+                    self.conn.commit()
+                    migrated += len(batch)
+                    batch = []
+
+            if batch:
+                cursor.executemany(
+                    f"UPDATE {table} SET embedding = ? WHERE id = ?", batch
+                )
+                self.conn.commit()
+                migrated += len(batch)
+
+        return {"migrated": migrated, "skipped": skipped, "errors": errors}
 
     async def update_access_stats(self, memory_id: int):
         """Update access statistics for a memory."""
@@ -1401,53 +1586,53 @@ class DatabaseService:
         # Clamp confidence to valid range
         confidence = max(0.0, min(1.0, confidence))
 
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO memories (
-                type, content, embedding, metadata,
-                project_path, project_name, project_type, tech_stack,
-                session_id, chat_id,
-                agent_type, skill_used, tools_used,
-                outcome, success,
-                tags, importance, confidence,
-                outcome_status, fixed, did_not_fix, caused, superseded_by,
-                worked_in, failed_in, context_confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                memory_type,
-                content,
-                self._serialize_embedding(embedding),
-                json.dumps(metadata or {}),
-                project_path,
-                project_name,
-                project_type,
-                json.dumps(tech_stack) if tech_stack else None,
-                session_id,
-                chat_id,
-                agent_type,
-                skill_used,
-                json.dumps(tools_used) if tools_used else None,
-                outcome,
-                1 if success else (0 if success is False else None),
-                json.dumps(tags) if tags else None,
-                importance,
-                confidence,
-                outcome_status,
-                json.dumps(fixed) if fixed else None,
-                json.dumps(did_not_fix) if did_not_fix else None,
-                json.dumps(caused) if caused else None,
-                superseded_by,
-                json.dumps(worked_in) if worked_in else None,
-                json.dumps(failed_in) if failed_in else None,
-                context_confidence
+        with self.transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO memories (
+                    type, content, embedding, metadata,
+                    project_path, project_name, project_type, tech_stack,
+                    session_id, chat_id,
+                    agent_type, skill_used, tools_used,
+                    outcome, success,
+                    tags, importance, confidence,
+                    outcome_status, fixed, did_not_fix, caused, superseded_by,
+                    worked_in, failed_in, context_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_type,
+                    content,
+                    self._serialize_embedding(embedding),
+                    json.dumps(metadata or {}),
+                    project_path,
+                    project_name,
+                    project_type,
+                    json.dumps(tech_stack) if tech_stack else None,
+                    session_id,
+                    chat_id,
+                    agent_type,
+                    skill_used,
+                    json.dumps(tools_used) if tools_used else None,
+                    outcome,
+                    1 if success else (0 if success is False else None),
+                    json.dumps(tags) if tags else None,
+                    importance,
+                    confidence,
+                    outcome_status,
+                    json.dumps(fixed) if fixed else None,
+                    json.dumps(did_not_fix) if did_not_fix else None,
+                    json.dumps(caused) if caused else None,
+                    superseded_by,
+                    json.dumps(worked_in) if worked_in else None,
+                    json.dumps(failed_in) if failed_in else None,
+                    context_confidence
+                )
             )
-        )
-        self.conn.commit()
-        memory_id = cursor.lastrowid
+            memory_id = cursor.lastrowid
 
-        # Add to FAISS index if available
+        # Add to FAISS index if available (outside transaction - index is in-memory)
         if self._memories_index and embedding:
             self._memories_index.add(memory_id, embedding)
 
@@ -1469,7 +1654,10 @@ class DatabaseService:
         include_unreliable: bool = False,
         outcome_status: Optional[str] = None,
         # Context-aware search
-        current_context: Optional[Dict[str, Any]] = None
+        current_context: Optional[Dict[str, Any]] = None,
+        # Adaptive ranking
+        query_text: Optional[str] = None,
+        temperature: Optional[float] = None
     ) -> List[Dict[str, Any]]:
         """Search for similar memories with optional filters.
 
@@ -1653,13 +1841,28 @@ class DatabaseService:
                         "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
                     })
 
-                # Sort by combined score: (similarity * 0.7) + (confidence * 0.3) + context_adjustment
-                # This ranking prioritizes semantic relevance while boosting high-confidence memories
-                # and adjusting for context compatibility
-                results.sort(
-                    key=lambda x: (x["similarity"] * 0.7) + (x["confidence"] * 0.3) + x.get("context_adjustment", 0.0),
-                    reverse=True
-                )
+                # Compute decay multipliers
+                from services.memory_decay import calculate_search_decay_multiplier
+                for r in results:
+                    r["_decay_multiplier"] = calculate_search_decay_multiplier(r)
+
+                # Adaptive ranking: multi-signal scoring with temperature control
+                try:
+                    from services.adaptive_ranker import AdaptiveRanker
+                    ranker = AdaptiveRanker(temperature=temperature)
+                    results = ranker.rank_results(
+                        results,
+                        query_text=query_text or '',
+                        temperature=temperature
+                    )
+                except ImportError:
+                    # Fallback to original static formula if adaptive ranker unavailable
+                    results.sort(
+                        key=lambda x: (
+                            (x["similarity"] * 0.7) + (x["confidence"] * 0.3) + x.get("context_adjustment", 0.0)
+                        ) * x.get("_decay_multiplier", 1.0),
+                        reverse=True
+                    )
 
                 # Update last_accessed for returned results
                 if results:
@@ -1807,9 +2010,15 @@ class DatabaseService:
                         "metadata": json.loads(row["metadata"]) if row["metadata"] else {}
                     })
 
-        # Sort by combined score including outcome boost and context adjustment
+        # Sort by combined score including outcome boost, context adjustment, and decay
+        from services.memory_decay import calculate_search_decay_multiplier
+        for r in results:
+            r["_decay_multiplier"] = calculate_search_decay_multiplier(r)
+
         results.sort(
-            key=lambda x: ((x["similarity"] * 0.7) + (x["confidence"] * 0.3) + x.get("context_adjustment", 0.0)) * x.get("outcome_boost", 1.0),
+            key=lambda x: (
+                (x["similarity"] * 0.7) + (x["confidence"] * 0.3) + x.get("context_adjustment", 0.0)
+            ) * x.get("outcome_boost", 1.0) * x.get("_decay_multiplier", 1.0),
             reverse=True
         )
 
@@ -1869,6 +2078,185 @@ class DatabaseService:
             "new_confidence": confidence,
             "message": f"Confidence updated from {old_confidence:.3f} to {confidence:.3f}"
         }
+
+    async def find_similar_for_dedup(
+        self,
+        embedding: List[float],
+        project_path: Optional[str] = None,
+        threshold: float = 0.92,
+        limit: int = 3
+    ) -> List[Dict[str, Any]]:
+        """Lightweight similarity search specifically for dedup at ingest time.
+
+        Optimized for speed: returns minimal fields (id, content length,
+        importance, confidence, similarity) needed for merge decisions.
+
+        Args:
+            embedding: The embedding vector of the new content
+            project_path: Only check within the same project (required for scoping)
+            threshold: Minimum cosine similarity to consider a duplicate
+            limit: Maximum number of matches to return
+
+        Returns:
+            List of dicts with id, content, importance, confidence, similarity,
+            sorted by similarity descending. Empty list if no matches.
+        """
+        # Normalize project path for consistent matching
+        project_path = normalize_path(project_path)
+
+        # Ensure indexes are initialized
+        await self._init_vector_indexes()
+
+        cursor = self.conn.cursor()
+
+        # Try FAISS index first for fast search
+        if self._memories_index and self._memories_index.size() > 0:
+            # Get candidates from FAISS (search broadly, filter by project after)
+            candidate_limit = limit * 10  # Over-fetch to account for project filtering
+            candidates = self._memories_index.search(
+                query_embedding=embedding,
+                k=candidate_limit,
+                threshold=threshold
+            )
+
+            if candidates:
+                candidate_ids = [c[0] for c in candidates]
+                similarity_map = {c[0]: c[1] for c in candidates}
+
+                placeholders = ",".join("?" * len(candidate_ids))
+                query = f"""
+                    SELECT id, content, importance, confidence
+                    FROM memories
+                    WHERE id IN ({placeholders})
+                """
+                params = list(candidate_ids)
+
+                if project_path:
+                    query += " AND project_path = ?"
+                    params.append(project_path)
+
+                # Exclude already-failed memories from dedup
+                query += " AND (outcome_status IS NULL OR outcome_status != 'failed')"
+                query += " AND (failure_count IS NULL OR failure_count < 3)"
+
+                cursor.execute(query, params)
+                rows = cursor.fetchall()
+
+                results = []
+                for row in rows:
+                    similarity = similarity_map.get(row["id"], 0)
+                    if similarity >= threshold:
+                        results.append({
+                            "id": row["id"],
+                            "content": row["content"],
+                            "importance": row["importance"],
+                            "confidence": row["confidence"] if row["confidence"] is not None else 0.5,
+                            "similarity": similarity
+                        })
+
+                results.sort(key=lambda x: x["similarity"], reverse=True)
+                return results[:limit]
+
+        # Fallback: numpy-based linear scan (only within project for speed)
+        query = """
+            SELECT id, content, embedding, importance, confidence
+            FROM memories
+            WHERE embedding IS NOT NULL
+            AND (outcome_status IS NULL OR outcome_status != 'failed')
+            AND (failure_count IS NULL OR failure_count < 3)
+        """
+        params = []
+
+        if project_path:
+            query += " AND project_path = ?"
+            params.append(project_path)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        results = []
+        for row in rows:
+            stored_embedding = self._deserialize_embedding(row["embedding"])
+            if stored_embedding:
+                similarity = self._cosine_similarity(embedding, stored_embedding)
+                if similarity >= threshold:
+                    results.append({
+                        "id": row["id"],
+                        "content": row["content"],
+                        "importance": row["importance"],
+                        "confidence": row["confidence"] if row["confidence"] is not None else 0.5,
+                        "similarity": similarity
+                    })
+
+        results.sort(key=lambda x: x["similarity"], reverse=True)
+        return results[:limit]
+
+    async def merge_memory(
+        self,
+        existing_id: int,
+        new_content: str,
+        new_importance: int,
+        new_confidence: float
+    ) -> int:
+        """Merge new content into an existing memory (dedup merge).
+
+        Keeps the longer content, takes the higher importance and confidence,
+        increments access_count, and updates the timestamp.
+
+        Args:
+            existing_id: ID of the existing memory to merge into
+            new_content: Content from the new (duplicate) memory
+            new_importance: Importance from the new memory
+            new_confidence: Confidence from the new memory
+
+        Returns:
+            The existing memory ID that was updated
+        """
+        with self.transaction() as conn:
+            cursor = conn.cursor()
+
+            cursor.execute(
+                "SELECT id, content, importance, confidence FROM memories WHERE id = ?",
+                [existing_id]
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                raise ValueError(f"Memory with ID {existing_id} not found for merge")
+
+            # Keep the longer content (more detail is better)
+            merged_content = new_content if len(new_content) > len(row["content"]) else row["content"]
+
+            # Take the higher importance and confidence
+            merged_importance = max(new_importance, row["importance"] or 0)
+            merged_confidence = max(
+                new_confidence,
+                row["confidence"] if row["confidence"] is not None else 0.5
+            )
+            merged_confidence = max(0.0, min(1.0, merged_confidence))
+
+            cursor.execute(
+                """
+                UPDATE memories
+                SET content = ?,
+                    importance = ?,
+                    confidence = ?,
+                    access_count = COALESCE(access_count, 0) + 1,
+                    updated_at = datetime('now'),
+                    last_accessed = datetime('now')
+                WHERE id = ?
+                """,
+                [merged_content, merged_importance, merged_confidence, existing_id]
+            )
+
+        logger.info(
+            f"Merged memory into #{existing_id}: "
+            f"importance {row['importance']}->{merged_importance}, "
+            f"confidence {row['confidence']}->{merged_confidence:.2f}, "
+            f"content_len {len(row['content'])}->{len(merged_content)}"
+        )
+
+        return existing_id
 
     async def keyword_search(
         self,
@@ -3144,28 +3532,30 @@ class DatabaseService:
             return {"success": False, "error": f"Target memory {target_id} not found"}
 
         try:
-            cursor.execute("""
-                INSERT INTO memory_relationships (source_id, target_id, relationship, strength)
-                VALUES (?, ?, ?, ?)
-            """, (source_id, target_id, relationship, strength))
-            self.conn.commit()
+            with self.transaction() as conn:
+                tx_cursor = conn.cursor()
+                tx_cursor.execute("""
+                    INSERT INTO memory_relationships (source_id, target_id, relationship, strength)
+                    VALUES (?, ?, ?, ?)
+                """, (source_id, target_id, relationship, strength))
 
-            return {
-                "success": True,
-                "id": cursor.lastrowid,
-                "source_id": source_id,
-                "target_id": target_id,
-                "relationship": relationship,
-                "strength": strength
-            }
+                return {
+                    "success": True,
+                    "id": tx_cursor.lastrowid,
+                    "source_id": source_id,
+                    "target_id": target_id,
+                    "relationship": relationship,
+                    "strength": strength
+                }
         except sqlite3.IntegrityError:
             # Relationship already exists, update strength
-            cursor.execute("""
-                UPDATE memory_relationships
-                SET strength = ?, created_at = CURRENT_TIMESTAMP
-                WHERE source_id = ? AND target_id = ? AND relationship = ?
-            """, (strength, source_id, target_id, relationship))
-            self.conn.commit()
+            with self.transaction() as conn:
+                tx_cursor = conn.cursor()
+                tx_cursor.execute("""
+                    UPDATE memory_relationships
+                    SET strength = ?, created_at = CURRENT_TIMESTAMP
+                    WHERE source_id = ? AND target_id = ? AND relationship = ?
+                """, (strength, source_id, target_id, relationship))
 
             return {
                 "success": True,
@@ -3256,6 +3646,137 @@ class DatabaseService:
                             await traverse(related_id, current_depth + 1)
 
         await traverse(memory_id, 1)
+        return results
+
+    async def get_related_memories_batch(
+        self,
+        memory_ids: List[int],
+        relationship: str = None,
+        direction: str = 'both'
+    ) -> Dict[int, list]:
+        """Get related memories for multiple IDs in a single query batch.
+
+        More efficient than calling get_related_memories() in a loop because
+        it uses IN (...) clauses instead of individual queries per memory_id.
+
+        Args:
+            memory_ids: List of memory IDs to find relationships for
+            relationship: Optional filter by relationship type
+            direction: 'outgoing', 'incoming', or 'both'
+
+        Returns:
+            Dict mapping memory_id -> list of related memories
+        """
+        if not memory_ids:
+            return {}
+
+        cursor = self.conn.cursor()
+        results = {mid: [] for mid in memory_ids}
+        placeholders = ','.join('?' * len(memory_ids))
+
+        queries = []
+        if direction in ('outgoing', 'both'):
+            q = f"""
+                SELECT mr.source_id, mr.target_id as related_id, mr.relationship,
+                       mr.strength, 'outgoing' as direction,
+                       m.type, m.content, m.project_path, m.importance, m.created_at
+                FROM memory_relationships mr
+                JOIN memories m ON m.id = mr.target_id
+                WHERE mr.source_id IN ({placeholders})
+            """
+            params = list(memory_ids)
+            if relationship:
+                q += " AND mr.relationship = ?"
+                params.append(relationship)
+            queries.append((q, params, 'source_id'))
+
+        if direction in ('incoming', 'both'):
+            q = f"""
+                SELECT mr.target_id, mr.source_id as related_id, mr.relationship,
+                       mr.strength, 'incoming' as direction,
+                       m.type, m.content, m.project_path, m.importance, m.created_at
+                FROM memory_relationships mr
+                JOIN memories m ON m.id = mr.source_id
+                WHERE mr.target_id IN ({placeholders})
+            """
+            params = list(memory_ids)
+            if relationship:
+                q += " AND mr.relationship = ?"
+                params.append(relationship)
+            queries.append((q, params, 'target_id'))
+
+        for query, params, id_col in queries:
+            cursor.execute(query, params)
+            for row in cursor.fetchall():
+                owner_id = row[id_col]
+                if owner_id in results:
+                    results[owner_id].append({
+                        "id": row["related_id"],
+                        "relationship": row["relationship"],
+                        "strength": row["strength"],
+                        "direction": row["direction"],
+                        "type": row["type"],
+                        "content": row["content"][:200] + "..." if len(row["content"]) > 200 else row["content"],
+                        "project_path": row["project_path"],
+                        "importance": row["importance"],
+                        "created_at": row["created_at"]
+                    })
+
+        return results
+
+    async def find_contradictions_batch(self, memory_ids: List[int]) -> Dict[int, list]:
+        """Find contradictions for multiple memories in a single query.
+
+        Args:
+            memory_ids: List of memory IDs
+
+        Returns:
+            Dict mapping memory_id -> list of contradicting memories
+        """
+        if not memory_ids:
+            return {}
+
+        cursor = self.conn.cursor()
+        results = {mid: [] for mid in memory_ids}
+        placeholders = ','.join('?' * len(memory_ids))
+
+        # Check both directions of contradiction relationships
+        cursor.execute(f"""
+            SELECT mr.source_id, mr.target_id, mr.strength,
+                   m.id as related_id, m.type, m.content, m.project_path
+            FROM memory_relationships mr
+            JOIN memories m ON m.id = mr.target_id
+            WHERE mr.relationship = 'contradicts'
+            AND mr.source_id IN ({placeholders})
+        """, memory_ids)
+
+        for row in cursor.fetchall():
+            src = row["source_id"]
+            if src in results:
+                results[src].append({
+                    "id": row["related_id"],
+                    "content": row["content"][:200],
+                    "type": row["type"]
+                })
+
+        cursor.execute(f"""
+            SELECT mr.target_id, mr.source_id, mr.strength,
+                   m.id as related_id, m.type, m.content, m.project_path
+            FROM memory_relationships mr
+            JOIN memories m ON m.id = mr.source_id
+            WHERE mr.relationship = 'contradicts'
+            AND mr.target_id IN ({placeholders})
+        """, memory_ids)
+
+        for row in cursor.fetchall():
+            tgt = row["target_id"]
+            if tgt in results:
+                results[tgt].append({
+                    "id": row["related_id"],
+                    "content": row["content"][:200],
+                    "type": row["type"]
+                })
+
         return results
 
     async def get_causal_chain(self, memory_id: int, max_depth: int = 5) -> dict:
@@ -3635,3 +4156,269 @@ class DatabaseService:
             "most_connected_memories": most_connected,
             "project_path": project_path
         }
+
+    # ============================================================
+    # CROSS-SESSION AWARENESS METHODS
+    # ============================================================
+
+    async def register_active_session(
+        self, session_id: str, project_path: str,
+        goal: Optional[str] = None, label: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Register a new active session or update if already exists."""
+        project_path = normalize_path(project_path)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO active_sessions (session_id, project_path, current_goal, session_label)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    status = 'active',
+                    last_heartbeat = datetime('now'),
+                    current_goal = COALESCE(excluded.current_goal, active_sessions.current_goal),
+                    session_label = COALESCE(excluded.session_label, active_sessions.session_label)
+            """, (session_id, project_path, goal, label))
+            conn.commit()
+        return {"success": True, "session_id": session_id}
+
+    async def heartbeat_session(
+        self, session_id: str,
+        files_modified: Optional[List[str]] = None,
+        current_goal: Optional[str] = None,
+        key_decisions: Optional[List[str]] = None,
+        summary: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Update session heartbeat and optional metadata."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            updates = ["last_heartbeat = datetime('now')", "status = 'active'"]
+            params = []
+            if files_modified is not None:
+                updates.append("files_modified = ?")
+                params.append(json.dumps(files_modified))
+            if current_goal is not None:
+                updates.append("current_goal = ?")
+                params.append(current_goal)
+            if key_decisions is not None:
+                updates.append("key_decisions = ?")
+                params.append(json.dumps(key_decisions))
+            if summary is not None:
+                updates.append("brief_summary = ?")
+                params.append(summary)
+            params.append(session_id)
+            cursor.execute(
+                f"UPDATE active_sessions SET {', '.join(updates)} WHERE session_id = ?",
+                params
+            )
+            conn.commit()
+        return {"success": True, "updated": cursor.rowcount > 0}
+
+    async def deregister_session(self, session_id: str) -> Dict[str, Any]:
+        """Mark a session as completed."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE active_sessions SET status = 'completed', last_heartbeat = datetime('now') WHERE session_id = ?",
+                (session_id,)
+            )
+            conn.commit()
+        return {"success": True, "deregistered": cursor.rowcount > 0}
+
+    async def get_active_sessions(
+        self, project_path: str, exclude_session_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get active/idle sibling sessions for a project."""
+        project_path = normalize_path(project_path)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if exclude_session_id:
+                cursor.execute("""
+                    SELECT session_id, project_path, start_time, last_heartbeat,
+                           current_goal, status, files_modified, key_decisions,
+                           brief_summary, session_label
+                    FROM active_sessions
+                    WHERE project_path = ? AND status IN ('active', 'idle')
+                      AND session_id != ?
+                    ORDER BY last_heartbeat DESC
+                """, (project_path, exclude_session_id))
+            else:
+                cursor.execute("""
+                    SELECT session_id, project_path, start_time, last_heartbeat,
+                           current_goal, status, files_modified, key_decisions,
+                           brief_summary, session_label
+                    FROM active_sessions
+                    WHERE project_path = ? AND status IN ('active', 'idle')
+                    ORDER BY last_heartbeat DESC
+                """, (project_path,))
+            rows = cursor.fetchall()
+        return [
+            {
+                "session_id": r["session_id"],
+                "project_path": r["project_path"],
+                "start_time": r["start_time"],
+                "last_heartbeat": r["last_heartbeat"],
+                "current_goal": r["current_goal"],
+                "status": r["status"],
+                "files_modified": json.loads(r["files_modified"] or "[]"),
+                "key_decisions": json.loads(r["key_decisions"] or "[]"),
+                "brief_summary": r["brief_summary"],
+                "session_label": r["session_label"],
+            }
+            for r in rows
+        ]
+
+    async def post_session_activity(
+        self, session_id: str, project_path: str,
+        event_type: str, summary: str, files: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Post an event to the cross-session activity feed."""
+        project_path = normalize_path(project_path)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO session_activity (session_id, project_path, event_type, summary, files)
+                VALUES (?, ?, ?, ?, ?)
+            """, (session_id, project_path, event_type, summary, json.dumps(files or [])))
+            conn.commit()
+        return {"success": True, "id": cursor.lastrowid}
+
+    async def get_session_activity_feed(
+        self, project_path: str, limit: int = 20,
+        since: Optional[str] = None, exclude_session_id: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get recent cross-session activity events."""
+        project_path = normalize_path(project_path)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            query = "SELECT * FROM session_activity WHERE project_path = ?"
+            params: list = [project_path]
+            if since:
+                query += " AND timestamp > ?"
+                params.append(since)
+            if exclude_session_id:
+                query += " AND session_id != ?"
+                params.append(exclude_session_id)
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+        return [
+            {
+                "id": r["id"],
+                "session_id": r["session_id"],
+                "project_path": r["project_path"],
+                "event_type": r["event_type"],
+                "summary": r["summary"],
+                "files": json.loads(r["files"] or "[]"),
+                "timestamp": r["timestamp"],
+            }
+            for r in rows
+        ]
+
+    async def detect_file_conflicts(
+        self, session_id: str, project_path: str
+    ) -> List[Dict[str, Any]]:
+        """Detect file conflicts between this session and active siblings."""
+        project_path = normalize_path(project_path)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Get this session's files
+            cursor.execute(
+                "SELECT files_modified FROM active_sessions WHERE session_id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+            my_files = set(json.loads(row["files_modified"] or "[]"))
+            if not my_files:
+                return []
+
+            # Get sibling sessions' files
+            cursor.execute("""
+                SELECT session_id, files_modified, session_label, current_goal
+                FROM active_sessions
+                WHERE project_path = ? AND status IN ('active', 'idle')
+                  AND session_id != ?
+            """, (project_path, session_id))
+            siblings = cursor.fetchall()
+
+        conflicts = []
+        for sib in siblings:
+            sib_files = set(json.loads(sib["files_modified"] or "[]"))
+            overlap = my_files & sib_files
+            if overlap:
+                conflicts.append({
+                    "session_id": sib["session_id"],
+                    "session_label": sib["session_label"],
+                    "current_goal": sib["current_goal"],
+                    "conflicting_files": sorted(overlap),
+                })
+        return conflicts
+
+    async def cleanup_stale_sessions(
+        self, idle_minutes: int = 10, completed_minutes: int = 30
+    ) -> Dict[str, Any]:
+        """Mark stale sessions as idle/completed and clean up old activity."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Mark active sessions with no heartbeat as idle
+            cursor.execute("""
+                UPDATE active_sessions SET status = 'idle'
+                WHERE status = 'active'
+                  AND last_heartbeat < datetime('now', ? || ' minutes')
+            """, (f"-{idle_minutes}",))
+            marked_idle = cursor.rowcount
+
+            # Mark idle sessions as completed after longer timeout
+            cursor.execute("""
+                UPDATE active_sessions SET status = 'completed'
+                WHERE status = 'idle'
+                  AND last_heartbeat < datetime('now', ? || ' minutes')
+            """, (f"-{completed_minutes}",))
+            marked_completed = cursor.rowcount
+
+            # Delete old completed sessions (older than 24h)
+            cursor.execute("""
+                DELETE FROM active_sessions
+                WHERE status = 'completed'
+                  AND last_heartbeat < datetime('now', '-24 hours')
+            """)
+            deleted_sessions = cursor.rowcount
+
+            # Delete old activity events (older than configured max age)
+            cursor.execute("""
+                DELETE FROM session_activity
+                WHERE timestamp < datetime('now', '-24 hours')
+            """)
+            deleted_events = cursor.rowcount
+
+            conn.commit()
+        return {
+            "marked_idle": marked_idle,
+            "marked_completed": marked_completed,
+            "deleted_sessions": deleted_sessions,
+            "deleted_events": deleted_events,
+        }
+
+    async def append_file_modified(self, session_id: str, file_path: str) -> Dict[str, Any]:
+        """Atomically append a file to a session's files_modified list."""
+        file_path = normalize_path(file_path)
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT files_modified FROM active_sessions WHERE session_id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return {"success": False, "error": "Session not found"}
+            files = json.loads(row["files_modified"] or "[]")
+            if file_path not in files:
+                files.append(file_path)
+                cursor.execute(
+                    "UPDATE active_sessions SET files_modified = ? WHERE session_id = ?",
+                    (json.dumps(files), session_id)
+                )
+                conn.commit()
+        return {"success": True, "files_count": len(files)}

@@ -1,0 +1,33 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Test files
+test_*.py
+verify_db.py
+
+# Development files
+*.db
+*.log
+*.zip
+*.png
+*.index
+*.json.bak
+debug.log
+.env
+
+# Build artifacts
+node_modules/
+package-lock.json
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+
+# Project-specific dev files
+indexes/
+memories.db
+.claude/
+.claude_session
