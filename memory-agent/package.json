@@ -1,7 +1,7 @@
 {
   "name": "claude-memory-agent",
-  "version": "3.0.3",
-  "description": "Persistent semantic memory system for Claude Code sessions with anti-hallucination grounding",
+  "version": "3.1.0",
+  "description": "Persistent semantic memory for Claude Code with soul layer, personality learning, and anti-hallucination grounding",
   "keywords": [
     "claude",
     "claude-code",
