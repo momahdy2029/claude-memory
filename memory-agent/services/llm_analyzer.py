@@ -143,7 +143,7 @@ class LLMAnalyzer:
             return not self._degraded_mode
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await asyncio.wait_for(
                 loop.run_in_executor(None, lambda: self.client.list()),
                 timeout=2.0
@@ -281,7 +281,7 @@ Rules:
 - Only include meaningful, actionable items"""
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _generate():
                 return self.client.generate(
@@ -409,7 +409,7 @@ Return JSON only:
 {{"has_contradiction": true/false, "conflicting_fact": "the fact it conflicts with or null", "reason": "brief explanation or null", "confidence": 0.0-1.0}}"""
 
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _generate():
                     return self.client.generate(
@@ -493,7 +493,7 @@ Recent events:
 Write a brief summary focusing on: what's being worked on, key decisions made, current status."""
 
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _generate():
                     return self.client.generate(

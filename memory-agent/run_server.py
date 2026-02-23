@@ -1,6 +1,8 @@
 """Run the memory agent server (for background/production use).
 
-Uses Windows file locking (msvcrt.locking) for a true process mutex.
+Uses file locking for a true process mutex:
+- Windows: msvcrt.locking()
+- macOS/Linux: fcntl.flock()
 The lock is held for the entire lifetime of the server, ensuring only
 one instance can run at a time.
 """
@@ -9,8 +11,11 @@ import sys
 import time
 import atexit
 import signal
+import platform
 import uvicorn
 from dotenv import load_dotenv
+
+IS_WINDOWS = platform.system() == "Windows"
 
 load_dotenv()
 
@@ -31,26 +36,30 @@ def is_port_in_use(port: int) -> bool:
 
 
 def acquire_server_lock() -> bool:
-    """Acquire exclusive server lock using Windows file locking.
+    """Acquire exclusive server lock using platform-appropriate file locking.
 
-    This uses msvcrt.locking() which provides mandatory file locking on Windows.
+    - Windows: msvcrt.locking() with LK_NBLCK for non-blocking exclusive lock
+    - macOS/Linux: fcntl.flock() with LOCK_EX | LOCK_NB for non-blocking exclusive lock
+
     The lock is held as long as the file handle remains open.
     """
     global _lock_handle
-    import msvcrt
 
     my_pid = os.getpid()
 
     try:
         # Open file for read/write, create if doesn't exist
-        # Using os.open to get a file descriptor for msvcrt.locking
         _lock_handle = open(LOCK_FILE, 'w+')
 
-        # Try to acquire exclusive lock (non-blocking)
-        # msvcrt.LK_NBLCK = non-blocking exclusive lock
+        # Try to acquire exclusive lock (non-blocking), platform-specific
         try:
-            msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
-        except (IOError, OSError) as e:
+            if IS_WINDOWS:
+                import msvcrt
+                msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (IOError, OSError):
             # Lock is held by another process
             print(f"[MUTEX] Cannot acquire lock - another instance is running")
             _lock_handle.close()
@@ -86,13 +95,17 @@ def acquire_server_lock() -> bool:
 def release_server_lock():
     """Release the server lock on exit."""
     global _lock_handle
-    import msvcrt
 
     try:
         if _lock_handle:
             try:
-                # Unlock the file
-                msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                # Unlock the file, platform-specific
+                if IS_WINDOWS:
+                    import msvcrt
+                    msvcrt.locking(_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(_lock_handle.fileno(), fcntl.LOCK_UN)
             except:
                 pass
             _lock_handle.close()
@@ -129,7 +142,7 @@ if __name__ == "__main__":
     # Note: The lock is held because _lock_handle stays open
     uvicorn.run(
         "main:app",
-        host=os.getenv("HOST", "0.0.0.0"),
+        host=os.getenv("HOST", "127.0.0.1"),
         port=PORT,
         reload=False,
         log_level="warning"

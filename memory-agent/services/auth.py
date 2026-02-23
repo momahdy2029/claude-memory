@@ -26,6 +26,8 @@ DEFAULT_RATE_LIMIT = int(os.getenv("AUTH_RATE_LIMIT", "100"))  # requests per mi
 RATE_LIMIT_WINDOW = int(os.getenv("AUTH_RATE_WINDOW", "60"))  # seconds
 
 # Endpoints that don't require authentication
+# This is a local-only tool, so all API endpoints are exempt by default.
+# When AUTH_ENABLED=true, only /skills/call and /tasks/send require a key.
 EXEMPT_ENDPOINTS = [
     "/health",
     "/health/live",
@@ -33,24 +35,11 @@ EXEMPT_ENDPOINTS = [
     "/.well-known/agent.json",
     "/docs",
     "/openapi.json",
-    "/api/auth/stats",  # Allow checking auth status without key
-    "/dashboard",  # Dashboard needs initial access
+    "/dashboard",
     "/favicon.ico",
-    # Dashboard API endpoints
-    "/api/stats",
-    "/api/projects",
-    "/api/agents",
-    "/api/mcps",
-    "/api/hooks",
-    "/api/sessions",
     "/ws",  # WebSocket
-    "/a2a",  # Agent-to-Agent protocol (dashboard uses this)
-    "/api/project/",  # Project config endpoints
-    # Automation endpoints
-    "/api/inject",
-    "/api/memory/natural",
-    "/api/memory/",  # Covers confidence, verify, outdated
-    "/api/claude-md",
+    "/a2a",  # Agent-to-Agent protocol
+    "/api/",  # All dashboard and REST API endpoints
 ]
 
 

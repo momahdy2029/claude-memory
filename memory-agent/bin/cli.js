@@ -388,7 +388,7 @@ async function runDoctor() {
 
 function printHelp() {
     console.log(`
-Claude Memory Agent v2.2.4
+Claude Memory Agent v3.0.1
 Persistent semantic memory for Claude Code sessions
 
 USAGE:
@@ -490,7 +490,7 @@ async function main() {
 
         case '--version':
         case '-v':
-            console.log('claude-memory-agent v2.2.4');
+            console.log('claude-memory-agent v3.0.1');
             break;
 
         default:

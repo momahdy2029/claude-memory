@@ -542,11 +542,18 @@ def setup_hooks(config: Dict[str, str]) -> bool:
         print_warning("Hooks directory not found in agent, skipping hook setup")
         return True
 
-    # Hooks to install
+    # Hooks to install (all 8 active hooks)
     hooks_to_install = [
         "session_start.py",
-        "session_end.py",
+        "session_end_hook.py",
+        "stop_hook.py",
         "grounding-hook.py",
+        "log-user-request.py",
+        "detect-correction.py",
+        "pre-tool-decision.py",
+        "log-tool-use.py",
+        "auto-detect-response.py",
+        "extract_memories.py",  # Required by session_end_hook
     ]
 
     installed = 0
@@ -574,54 +581,126 @@ def setup_hooks(config: Dict[str, str]) -> bool:
 
 
 def configure_hooks_json(auto: bool = False) -> bool:
-    """Configure hooks.json to enable the hooks."""
-    hooks_file = get_claude_settings_dir() / "hooks.json"
+    """Configure hooks in settings.json (Claude Code hook format).
 
-    # Default hooks configuration
+    Writes hooks config directly into ~/.claude/settings.json
+    using the correct Claude Code settings format.
+    """
+    settings_file = get_claude_settings_file()
+    python_exe = sys.executable
+    hooks_dir = get_hooks_dir()
+
+    # Build the hooks config in Claude Code settings.json format
     hooks_config = {
-        "hooks": {
-            "UserPromptSubmit": [
-                {
-                    "command": f"{sys.executable} {get_hooks_dir() / 'session_start.py'}",
-                    "description": "Initialize memory session",
-                    "timeout": 5000
-                },
-                {
-                    "command": f"{sys.executable} {get_hooks_dir() / 'grounding-hook.py'}",
-                    "description": "Inject grounding context",
-                    "timeout": 3000
-                }
-            ],
-            "SessionEnd": [
-                {
-                    "command": f"{sys.executable} {get_hooks_dir() / 'session_end.py'}",
-                    "description": "Save session summary",
-                    "timeout": 10000
-                }
-            ]
-        }
+        "UserPromptSubmit": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'detect-correction.py'}",
+                        "async": True,
+                    },
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'log-user-request.py'}",
+                        "async": True,
+                    },
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'grounding-hook.py'}",
+                    },
+                ],
+            }
+        ],
+        "PreToolUse": [
+            {
+                "matcher": "Edit|Write|Bash|Task",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'pre-tool-decision.py'}",
+                        "async": True,
+                    }
+                ],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Edit|Write|Bash|Read",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'log-tool-use.py'}",
+                        "async": True,
+                    }
+                ],
+            }
+        ],
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'stop_hook.py'}",
+                        "async": True,
+                    },
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'auto-detect-response.py'}",
+                        "async": True,
+                    },
+                ],
+            }
+        ],
+        "SessionStart": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'session_start.py'}",
+                    }
+                ],
+            }
+        ],
+        "SessionEnd": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"{python_exe} {hooks_dir / 'session_end_hook.py'}",
+                        "async": True,
+                    }
+                ],
+            }
+        ],
     }
 
-    # Merge with existing if present
-    if hooks_file.exists():
+    # Load existing settings
+    settings = {}
+    if settings_file.exists():
         try:
-            existing = json.loads(hooks_file.read_text())
-            # In auto mode, always merge; otherwise ask
-            should_update = auto or prompt_yes_no("hooks.json exists. Update with memory agent hooks?", default=True)
-            if should_update:
-                if "hooks" not in existing:
-                    existing["hooks"] = {}
-                existing["hooks"].update(hooks_config["hooks"])
-                hooks_config = existing
-            else:
-                print_success("Keeping existing hooks.json")
-                return True
+            settings = json.loads(settings_file.read_text())
         except json.JSONDecodeError:
-            pass
+            print_warning(f"Existing {settings_file.name} is invalid, creating backup")
+            shutil.copy(settings_file, settings_file.with_suffix(".json.bak"))
+            settings = {}
+
+    # Check if hooks already configured
+    if "hooks" in settings:
+        should_update = auto or prompt_yes_no("Hooks already configured in settings.json. Update with memory agent hooks?", default=True)
+        if not should_update:
+            print_success("Keeping existing hooks config")
+            return True
+
+    settings["hooks"] = hooks_config
 
     try:
-        hooks_file.write_text(json.dumps(hooks_config, indent=2))
-        print_success(f"Configured hooks: {hooks_file}")
+        settings_file.write_text(json.dumps(settings, indent=2))
+        print_success(f"Configured hooks in: {settings_file}")
         return True
     except Exception as e:
         print_error(f"Failed to configure hooks: {e}")
@@ -762,9 +841,25 @@ def uninstall() -> bool:
         except Exception as e:
             print_warning(f"Could not update settings: {e}")
 
-    # Remove hooks
+    # Remove hooks from settings.json
+    if settings_file.exists():
+        try:
+            settings = json.loads(settings_file.read_text())
+            if "hooks" in settings:
+                del settings["hooks"]
+                settings_file.write_text(json.dumps(settings, indent=2))
+                print_success("Removed hooks config from settings.json")
+        except Exception as e:
+            print_warning(f"Could not update hooks in settings: {e}")
+
+    # Remove hook files
     hooks_dir = get_hooks_dir()
-    hooks_to_remove = ["session_start.py", "session_end.py", "grounding-hook.py"]
+    hooks_to_remove = [
+        "session_start.py", "session_end_hook.py", "stop_hook.py",
+        "grounding-hook.py", "log-user-request.py", "detect-correction.py",
+        "pre-tool-decision.py", "log-tool-use.py", "auto-detect-response.py",
+        "extract_memories.py",
+    ]
     for hook in hooks_to_remove:
         hook_file = hooks_dir / hook
         if hook_file.exists():
@@ -964,7 +1059,7 @@ def main():
     else:
         try:
             subprocess.run(
-                [sys.executable, str(AGENT_DIR / "memory-agent"), "start"],
+                [sys.executable, str(AGENT_DIR / "main.py")],
                 cwd=str(AGENT_DIR),
                 timeout=30
             )

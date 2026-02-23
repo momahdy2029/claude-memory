@@ -143,7 +143,8 @@ def main():
         sys.exit(0)
 
     # Get user message from hook input
-    user_message = hook_input.get("user_prompt", "")
+    # Claude Code sends "prompt", legacy format uses "user_prompt"
+    user_message = hook_input.get("prompt", "") or hook_input.get("user_prompt", "")
     if not user_message:
         # Try alternative format
         session_messages = hook_input.get("session_messages", [])
@@ -155,14 +156,21 @@ def main():
     if not user_message:
         sys.exit(0)
 
-    # Load session data
-    session_data = load_session_data()
-    if not session_data:
-        sys.exit(0)
+    # Get session_id: stdin JSON > env var > .claude_session file
+    session_id = hook_input.get("session_id") or os.getenv("CLAUDE_SESSION_ID")
+    session_data = load_session_data() or {}
 
-    session_id = session_data.get("session_id")
+    if not session_id:
+        session_id = session_data.get("session_id")
+
     if not session_id:
         sys.exit(0)
+
+    # Ensure .claude_session file exists for sibling hooks
+    if not session_data or session_data.get("session_id") != session_id:
+        session_data = session_data or {}
+        session_data["session_id"] = session_id
+        save_session_data(session_data)
 
     # Truncate long messages
     summary = user_message[:200]

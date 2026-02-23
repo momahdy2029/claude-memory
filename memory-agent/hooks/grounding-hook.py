@@ -403,8 +403,24 @@ def check_and_trigger_flush(session_id: str, project_path: str):
 
 def main():
     """Main entry point for the hook."""
-    project_path = get_project_path()
-    session_id = get_session_id()
+    # Read hook input from stdin (Claude Code sends session_id, cwd, prompt)
+    hook_input = {}
+    try:
+        hook_input = json.load(sys.stdin)
+    except Exception:
+        pass
+
+    project_path = hook_input.get("cwd") or get_project_path()
+
+    # Get session_id: stdin JSON > env var > .claude_session file
+    session_id = hook_input.get("session_id") or get_session_id()
+
+    # Ensure .claude_session file exists for sibling hooks
+    if session_id:
+        session_data = load_session_data() or {}
+        if session_data.get("session_id") != session_id:
+            session_data["session_id"] = session_id
+            save_session_data(session_data)
 
     # If no session, try to init one
     if not session_id:
@@ -475,7 +491,7 @@ def main():
     curator_status = None
 
     # Only fetch curator context if there's user input to contextualize
-    user_input = os.getenv("CLAUDE_USER_INPUT", "")
+    user_input = hook_input.get("prompt", "") or hook_input.get("user_prompt", "") or os.getenv("CLAUDE_USER_INPUT", "")
     if user_input and len(user_input) > 10:
         curator_summary = call_memory_agent("curator_get_summary", {
             "query": user_input[:500],  # Limit query length

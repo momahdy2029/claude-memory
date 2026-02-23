@@ -127,23 +127,20 @@ def fit_response(
     if len(output) <= max_chars:
         return _with_meta(output, working, level, max_chars)
 
-    # Level 5: emergency hard truncation
+    # Level 5: emergency hard truncation — return valid JSON
     level = 5
     logger.warning(
         "Response required emergency truncation: %d -> %d chars",
         len(output), max_chars,
     )
-    output = output[:max_chars - 100]
-    # Append a valid JSON suffix with metadata
-    meta = json.dumps({
+    return json.dumps({
         "_response_meta": {
             "degradation_level": level,
             "truncated": True,
-            "original_chars": _json_size(data, indent=None),
+            "original_chars": len(output),
             "note": "Response was emergency-truncated. Use specific queries to retrieve full data.",
         }
     })
-    return output + "\n" + meta
 
 
 def _with_meta(

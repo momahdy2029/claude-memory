@@ -306,6 +306,122 @@ def _store_memory(extraction: Dict[str, Any], project_path: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
+# Soul fragment capture (lightweight regex → HTTP POST)
+# ---------------------------------------------------------------------------
+
+SOUL_PATTERNS = {
+    "decision_made": [
+        re.compile(
+            r"(?:let's|we'll|going to|chose to|decided to)\s+(?:use|go with|implement|try)\s+(.+)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:using|choosing|picked)\s+(\S+)\s+(?:because|since|for)",
+            re.IGNORECASE,
+        ),
+    ],
+    "preference_expressed": [
+        re.compile(
+            r"(?:I prefer|you should always|always use|never use|don't use|I like to)\s+(.+)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:remember to|make sure to|don't forget to)\s+(.+)",
+            re.IGNORECASE,
+        ),
+    ],
+    "error_resolved": [
+        re.compile(
+            r"(?:fixed|resolved|solved|the issue was|root cause)\s*:?\s*(.+)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:the (?:fix|solution) (?:was|is))\s+(.+)",
+            re.IGNORECASE,
+        ),
+    ],
+    "pattern_used": [
+        re.compile(
+            r"(?:same (?:approach|pattern|method) as)\s+(.+)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?:like we did (?:for|in|with))\s+(.+)",
+            re.IGNORECASE,
+        ),
+    ],
+    "correction_received": [
+        re.compile(
+            r"(?:no,?\s+(?:actually|that's wrong|not like that)|(?:don't|stop)\s+(?:do|doing)\s+that)\s*[,:]?\s*(.+)",
+            re.IGNORECASE,
+        ),
+    ],
+}
+
+
+def _capture_soul_fragments(
+    text: str, session_id: str, project_path: str
+):
+    """Extract and POST soul fragments from response text.
+
+    Runs regex extraction, then fires HTTP POST for each fragment.
+    Budget: < 200ms total. Non-blocking — failures are silent.
+    """
+    import urllib.request
+    import urllib.error
+
+    fragments = []
+    seen = set()
+
+    for fragment_type, patterns in SOUL_PATTERNS.items():
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                captured = match.group(1).strip() if match.lastindex else match.group(0).strip()
+                if len(captured) < 10 or len(captured) > 300:
+                    continue
+                key = captured[:50].lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                fragments.append({
+                    "fragment_type": fragment_type,
+                    "content": captured[:300],
+                })
+
+    if not fragments:
+        return
+
+    # POST each fragment (fire-and-forget, tight timeout)
+    captured_count = 0
+    for frag in fragments[:5]:  # Cap at 5 fragments per response
+        try:
+            payload = json.dumps({
+                "session_id": session_id,
+                "project_path": project_path,
+                "fragment_type": frag["fragment_type"],
+                "content": frag["content"],
+            }).encode("utf-8")
+
+            req = urllib.request.Request(
+                f"{MEMORY_AGENT_URL}/api/soul/capture",
+                data=payload,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=0.5) as resp:
+                if resp.status == 200:
+                    captured_count += 1
+        except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+            pass  # Silent failure — don't block the hook
+
+    if captured_count > 0:
+        print(
+            f"[Stop] Soul fragments captured: {captured_count}/{len(fragments)}",
+            file=sys.stderr,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -352,6 +468,13 @@ def main():
         # --- Persist new hashes to cursor file ---
         if stored_hashes:
             _save_cursor_hashes(session_id, stored_hashes)
+
+        # --- Soul fragment capture (lightweight, adds ~100ms) ---
+        elapsed = time.time() - start
+        if elapsed < TOTAL_TIME_BUDGET - 0.2:
+            _capture_soul_fragments(
+                response_text, session_id, project_path
+            )
 
         elapsed_total = round(time.time() - start, 3)
         print(

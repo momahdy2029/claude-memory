@@ -17,7 +17,8 @@ import os
 import sys
 import json
 import re
-import requests
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 # Configuration from environment
@@ -57,24 +58,27 @@ def get_session_id():
 def call_memory_agent(skill_id: str, params: dict) -> dict:
     """Call the memory agent API."""
     try:
-        response = requests.post(
-            f"{MEMORY_AGENT_URL}/a2a",
-            json={
-                "jsonrpc": "2.0",
-                "id": "correction-hook",
-                "method": "tasks/send",
-                "params": {
-                    "message": {"parts": [{"type": "text", "text": ""}]},
-                    "metadata": {
-                        "skill_id": skill_id,
-                        "params": params
-                    }
+        payload = json.dumps({
+            "jsonrpc": "2.0",
+            "id": "correction-hook",
+            "method": "tasks/send",
+            "params": {
+                "message": {"parts": [{"type": "text", "text": ""}]},
+                "metadata": {
+                    "skill_id": skill_id,
+                    "params": params
                 }
-            },
-            timeout=API_TIMEOUT
+            }
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            f"{MEMORY_AGENT_URL}/a2a",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
         )
-        return response.json()
-    except:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except Exception:
         return None
 
 def detect_correction(text: str) -> tuple[bool, str]:
@@ -103,11 +107,11 @@ def main():
     # Read hook input from stdin
     try:
         hook_input = json.load(sys.stdin)
-    except:
+    except (json.JSONDecodeError, ValueError, EOFError):
         sys.exit(0)
 
-    # Get user message
-    user_message = hook_input.get("user_prompt", "")
+    # Get user message (Claude Code sends "prompt", legacy uses "user_prompt")
+    user_message = hook_input.get("prompt", "") or hook_input.get("user_prompt", "")
     if not user_message:
         session_messages = hook_input.get("session_messages", [])
         if session_messages:
@@ -124,14 +128,15 @@ def main():
     if not is_correction:
         sys.exit(0)
 
-    # Load session data (includes current_request_id for causal chain)
-    session_data = load_session_data()
-    if not session_data:
+    # Load session data, prefer session_id from stdin
+    session_data = load_session_data() or {}
+    stdin_session_id = hook_input.get("session_id")
+    if stdin_session_id and session_data.get("session_id") != stdin_session_id:
+        session_data["session_id"] = stdin_session_id
+    if not session_data.get("session_id"):
         sys.exit(0)
 
     session_id = session_data.get("session_id")
-    if not session_id:
-        sys.exit(0)
 
     # Get the current request ID for causal chain linking
     root_event_id = session_data.get("current_request_id")

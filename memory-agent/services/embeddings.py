@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-DEFAULT_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")
+DEFAULT_MODEL = os.getenv("EMBEDDING_MODEL", "nomic-embed-text")  # Ollama default; sentence-transformers uses config.py
 HEALTH_CHECK_TIMEOUT = float(os.getenv("OLLAMA_HEALTH_TIMEOUT", "5.0"))
 HEALTH_CACHE_TTL = float(os.getenv("OLLAMA_HEALTH_CACHE_TTL", "30.0"))
 
@@ -178,7 +178,7 @@ class SentenceTransformerProvider(EmbeddingProvider):
             )
 
         self.model_name = model
-        self._model = SentenceTransformer(model, trust_remote_code=True)
+        self._model = SentenceTransformer(model, trust_remote_code=False)
         self._dimension = self._model.get_sentence_embedding_dimension()
 
     def embed(self, text: str) -> List[float]:
@@ -333,7 +333,7 @@ class EmbeddingService:
 
         start_time = time.time()
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             health_result = await asyncio.wait_for(
                 loop.run_in_executor(None, self._provider.check_health),
@@ -447,7 +447,7 @@ class EmbeddingService:
                 )
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _embed():
                 return self._provider.embed(text)
@@ -527,7 +527,7 @@ class EmbeddingService:
                 )
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _embed():
                 return self._provider.embed(text)
@@ -618,7 +618,7 @@ class EmbeddingService:
         # sentence-transformers has efficient native batching
         if self.provider_type == "sentence-transformers":
             try:
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
 
                 def _batch_embed():
                     return self._provider.embed_batch(texts)
@@ -712,7 +712,7 @@ class EmbeddingService:
             return self._available_models
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             provider: OllamaProvider = self._provider  # type: ignore[assignment]
             models = await loop.run_in_executor(None, provider.client.list)
             model_names = [

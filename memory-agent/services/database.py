@@ -603,7 +603,7 @@ class DatabaseService:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent_type)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_success ON memories(success)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_outcome_status ON memories(outcome_status)")
+        # NOTE: outcome_status index is created AFTER the migration adds the column (see below)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_patterns_problem ON patterns(problem_type)")
 
         # Migration helper function
@@ -658,6 +658,7 @@ class DatabaseService:
         safe_add_column("memories", "did_not_fix", "TEXT")  # JSON array of remaining issues
         safe_add_column("memories", "caused", "TEXT")  # JSON array of side effects
         safe_add_column("memories", "superseded_by", "INTEGER")  # FK to memories.id
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_memories_outcome_status ON memories(outcome_status)")
 
         # Migration: Add self-correcting confidence columns (v2.2.1)
         # Track solution outcomes for automatic confidence adjustment
@@ -1232,6 +1233,43 @@ class DatabaseService:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_activity_project ON session_activity(project_path, timestamp DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_session_activity_session ON session_activity(session_id, timestamp DESC)")
+
+        # ============================================================
+        # SOUL LAYER TABLES
+        # ============================================================
+
+        # Soul state - persistent synthesized understanding per project
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS soul_state (
+                project_path TEXT PRIMARY KEY,
+                soul_brief TEXT DEFAULT '',
+                user_model TEXT DEFAULT '{}',
+                project_understanding TEXT DEFAULT '{}',
+                success_journal TEXT DEFAULT '[]',
+                blind_spots TEXT DEFAULT '[]',
+                tool_preferences TEXT DEFAULT '{}',
+                last_integrated_at TEXT,
+                integration_count INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Soul fragments - staging area for session observations
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS soul_fragments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                fragment_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                raw_source TEXT DEFAULT '',
+                captured_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                integrated BOOLEAN DEFAULT 0
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soul_fragments_session ON soul_fragments(session_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_soul_fragments_project ON soul_fragments(project_path, integrated)")
 
         self.conn.commit()
 
@@ -3345,6 +3383,155 @@ class DatabaseService:
             }
             for row in cursor.fetchall()
         ]
+
+    # ============================================================
+    # SOUL LAYER METHODS
+    # ============================================================
+
+    async def get_soul_state(self, project_path: str) -> Optional[Dict[str, Any]]:
+        """Get the soul state for a project. Returns None if no state exists."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM soul_state WHERE project_path = ?",
+                    (project_path,)
+                )
+                row = cursor.fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            logger.warning(f"Failed to get soul state: {e}")
+            return None
+
+    async def upsert_soul_state(self, project_path: str, updates: Dict[str, Any]) -> bool:
+        """Create or update the soul state for a project.
+
+        Args:
+            project_path: Project path (primary key)
+            updates: Dict of column->value pairs to set
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                # Check if exists
+                cursor.execute(
+                    "SELECT 1 FROM soul_state WHERE project_path = ?",
+                    (project_path,)
+                )
+                exists = cursor.fetchone() is not None
+
+                if exists:
+                    # Build UPDATE dynamically from updates dict
+                    allowed_cols = {
+                        'soul_brief', 'user_model', 'project_understanding',
+                        'success_journal', 'blind_spots', 'tool_preferences',
+                        'last_integrated_at', 'integration_count'
+                    }
+                    set_parts = []
+                    values = []
+                    for col, val in updates.items():
+                        if col in allowed_cols:
+                            set_parts.append(f"{col} = ?")
+                            values.append(val)
+                    if not set_parts:
+                        return True
+                    set_parts.append("updated_at = CURRENT_TIMESTAMP")
+                    values.append(project_path)
+                    sql = f"UPDATE soul_state SET {', '.join(set_parts)} WHERE project_path = ?"
+                    cursor.execute(sql, values)
+                else:
+                    # INSERT with defaults + any provided updates
+                    cols = ['project_path']
+                    vals = [project_path]
+                    allowed_cols = {
+                        'soul_brief', 'user_model', 'project_understanding',
+                        'success_journal', 'blind_spots', 'tool_preferences',
+                        'last_integrated_at', 'integration_count'
+                    }
+                    for col, val in updates.items():
+                        if col in allowed_cols:
+                            cols.append(col)
+                            vals.append(val)
+                    placeholders = ', '.join(['?'] * len(cols))
+                    sql = f"INSERT INTO soul_state ({', '.join(cols)}) VALUES ({placeholders})"
+                    cursor.execute(sql, vals)
+
+                conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to upsert soul state: {e}")
+            return False
+
+    async def insert_soul_fragment(
+        self, session_id: str, project_path: str,
+        fragment_type: str, content: str, raw_source: str = ""
+    ) -> Optional[int]:
+        """Insert a soul fragment into the staging table."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """INSERT INTO soul_fragments
+                       (session_id, project_path, fragment_type, content, raw_source)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (session_id, project_path, fragment_type, content, raw_source)
+                )
+                conn.commit()
+                return cursor.lastrowid
+        except Exception as e:
+            logger.warning(f"Failed to insert soul fragment: {e}")
+            return None
+
+    async def get_session_fragments(
+        self, session_id: str, integrated: Optional[bool] = None
+    ) -> List[Dict[str, Any]]:
+        """Get all soul fragments for a session."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                if integrated is not None:
+                    cursor.execute(
+                        "SELECT * FROM soul_fragments WHERE session_id = ? AND integrated = ? ORDER BY captured_at",
+                        (session_id, int(integrated))
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT * FROM soul_fragments WHERE session_id = ? ORDER BY captured_at",
+                        (session_id,)
+                    )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.warning(f"Failed to get session fragments: {e}")
+            return []
+
+    async def get_unintegrated_fragments(self, project_path: str) -> List[Dict[str, Any]]:
+        """Get all unintegrated soul fragments for a project."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM soul_fragments WHERE project_path = ? AND integrated = 0 ORDER BY captured_at",
+                    (project_path,)
+                )
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.warning(f"Failed to get unintegrated fragments: {e}")
+            return []
+
+    async def mark_fragments_integrated(self, session_id: str) -> int:
+        """Mark all fragments for a session as integrated. Returns count."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE soul_fragments SET integrated = 1 WHERE session_id = ? AND integrated = 0",
+                    (session_id,)
+                )
+                conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            logger.warning(f"Failed to mark fragments integrated: {e}")
+            return 0
 
     # ============================================================
     # GENERIC QUERY METHOD

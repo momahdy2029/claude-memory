@@ -40,6 +40,7 @@ if AGENT_DIR not in sys.path:
 # ── Imports ─────────────────────────────────────────────────────────────
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ from config import config
 # Direct skill imports - no HTTP, no FastAPI dependency
 from skills.store import store_memory, store_project, store_pattern
 from skills.search import semantic_search, search_patterns, get_project_context
+from skills.timeline import timeline_log
 
 
 # ── Lifespan: DB + Embeddings initialization ───────────────────────────
@@ -159,6 +161,29 @@ async def memory_store(
         tech_stack=tech_stack,
         agent_type=agent_type,
     )
+
+    # Auto-create a timeline event for every stored memory
+    try:
+        event_type_map = {
+            "decision": "decision",
+            "error": "error",
+            "code": "action",
+            "session": "checkpoint",
+            "preference": "observation",
+            "chunk": "observation",
+        }
+        await timeline_log(
+            db=app.db,
+            embeddings=app.embeddings,
+            session_id=str(uuid.uuid4()),
+            event_type=event_type_map.get(memory_type, "observation"),
+            summary=content[:200],
+            details=content if len(content) > 200 else None,
+            project_path=project_path,
+        )
+    except Exception as e:
+        logger.debug(f"Timeline piggyback failed (non-fatal): {e}")
+
     return json.dumps(result, default=str)
 
 
@@ -364,6 +389,49 @@ async def memory_context(
         result["stats_error"] = str(e)
 
     result["success"] = True
+    return json.dumps(result, default=str)
+
+
+@mcp_server.tool()
+async def memory_timeline_log(
+    ctx: Context,
+    summary: str,
+    event_type: str = "observation",
+    details: Optional[str] = None,
+    project_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+    status: str = "completed",
+    outcome: Optional[str] = None,
+    is_anchor: bool = False,
+) -> str:
+    """Log an event to the session timeline.
+
+    Use this to record significant events: decisions made, errors encountered,
+    actions taken, or observations during a session.
+
+    Args:
+        summary: Brief description of the event (<200 chars)
+        event_type: Type: user_request, clarification, action, decision, observation, error, checkpoint
+        details: Full context (optional, for longer descriptions)
+        project_path: Project path
+        session_id: Session identifier (auto-generated if omitted)
+        status: Event status: completed, in_progress, failed, reverted
+        outcome: Result description
+        is_anchor: Mark as verified/anchor fact
+    """
+    app = _get_app(ctx)
+    result = await timeline_log(
+        db=app.db,
+        embeddings=app.embeddings,
+        session_id=session_id or str(uuid.uuid4()),
+        event_type=event_type,
+        summary=summary,
+        details=details,
+        project_path=project_path,
+        status=status,
+        outcome=outcome,
+        is_anchor=is_anchor,
+    )
     return json.dumps(result, default=str)
 
 

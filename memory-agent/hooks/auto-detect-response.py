@@ -261,12 +261,9 @@ def main():
     if not response_text or len(response_text) < 50:
         sys.exit(0)
 
-    # Load session data (includes current_request_id for causal chain)
-    session_data = load_session_data()
-    if not session_data:
-        sys.exit(0)
-
-    session_id = session_data.get("session_id")
+    # Load session data, prefer session_id from stdin
+    session_data = load_session_data() or {}
+    session_id = hook_input.get("session_id") or session_data.get("session_id")
     if not session_id:
         sys.exit(0)
 

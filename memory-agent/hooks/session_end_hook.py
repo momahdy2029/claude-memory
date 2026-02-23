@@ -75,6 +75,15 @@ def main():
                     pass
 
         # ---------------------------------------------------------------
+        # Step 1.7: Trigger soul integration (merge fragments → soul_state)
+        # ---------------------------------------------------------------
+        if session_id and project_path:
+            try:
+                _trigger_soul_integration(session_id, project_path, timeout=5.0)
+            except Exception as e:
+                print(f"[SessionEnd] Soul integration failed (non-fatal): {e}", file=sys.stderr)
+
+        # ---------------------------------------------------------------
         # Step 1.5: Deregister from cross-session awareness
         # ---------------------------------------------------------------
         if session_id:
@@ -178,6 +187,34 @@ def _trigger_session_wrapup(session_id: str, project_path: str, timeout: float =
                 print(f"[SessionEnd] Flush triggered successfully.", file=sys.stderr)
     except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
         print(f"[SessionEnd] Flush API call failed: {e}", file=sys.stderr)
+
+
+def _trigger_soul_integration(session_id: str, project_path: str, timeout: float = 5.0):
+    """Trigger soul integration — merges session fragments into persistent soul_state."""
+    import urllib.request
+    import urllib.error
+
+    memory_agent_url = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
+
+    payload = json.dumps({
+        "session_id": session_id,
+        "project_path": project_path,
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            f"{memory_agent_url}/api/soul/integrate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=min(timeout, 5.0)) as resp:
+            if resp.status == 200:
+                result = json.loads(resp.read().decode("utf-8"))
+                integrated = result.get("integrated", 0)
+                print(f"[SessionEnd] Soul integration complete: {integrated} fragments integrated.", file=sys.stderr)
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError) as e:
+        print(f"[SessionEnd] Soul integration API call failed: {e}", file=sys.stderr)
 
 
 if __name__ == "__main__":

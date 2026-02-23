@@ -466,6 +466,31 @@
             top: 0; left: 0; right: 0;
             height: 3px;
         }
+        .agent-badges {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+        .agent-badge {
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.3px;
+        }
+        .agent-badge.scope-global {
+            background: rgba(88, 166, 255, 0.15);
+            color: #58a6ff;
+        }
+        .agent-badge.scope-project {
+            background: rgba(63, 185, 80, 0.15);
+            color: #3fb950;
+        }
+        .agent-badge.category-badge {
+            background: var(--bg-tertiary);
+            color: var(--text-secondary);
+        }
         /* Config Cards */
         .config-card {
             background: var(--bg-card);
@@ -2205,6 +2230,10 @@
 
         <!-- Agents Tab -->
         <div class="tab-content active" id="agents-tab">
+            <div style="background: rgba(88,166,255,0.08); border: 1px solid rgba(88,166,255,0.2); border-radius: 12px; padding: 12px 20px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--text-secondary);">
+                <i class="fas fa-info-circle" style="color: #58a6ff; font-size: 16px;"></i>
+                <span>Agents discovered from <code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;">~/.claude/agents/</code>. Toggle moves files between <code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;">agents/</code> and <code style="background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px;">agents/_disabled/</code>. Global agents are available across all projects.</span>
+            </div>
             <div class="section-header">
                 <div class="search-bar">
                     <i class="fas fa-search"></i>
@@ -3056,8 +3085,9 @@
 
         async function loadAgentData() {
             try {
+                const agentParams = currentProject ? `?project_path=${encodeURIComponent(currentProject)}` : '';
                 const [agentsRes, mcpsRes, hooksRes] = await Promise.all([
-                    fetch(`${API_URL}/api/agents`),
+                    fetch(`${API_URL}/api/agents${agentParams}`),
                     fetch(`${API_URL}/api/mcps`),
                     fetch(`${API_URL}/api/hooks`)
                 ]);
@@ -3071,12 +3101,14 @@
                 document.getElementById('agentsTabCount').textContent = allAgents.length;
                 document.getElementById('mcpsTabCount').textContent = allMcps.length;
                 document.getElementById('hooksTabCount').textContent = allHooks.length;
+                // Update agent stats from discovery
+                const enabledCount = allAgents.filter(a => a.enabled).length;
+                document.getElementById('enabledAgentsCount').textContent = enabledCount;
+                document.getElementById('agentsTotalCount').textContent = `/ ${allAgents.length} total`;
                 renderCategoryFilter();
-                if (projectConfig) {
-                    renderAgents();
-                    renderMcps();
-                    renderHooks();
-                }
+                renderAgents();
+                renderMcps();
+                renderHooks();
             } catch (e) {
                 console.error('Error loading agent data:', e);
             }
@@ -3107,21 +3139,26 @@
         // Rendering
         function renderCategoryFilter() {
             const container = document.getElementById('categoryFilter');
-            container.innerHTML = `<div class="category-chip active" data-category="all" onclick="filterByCategory('all')"><i class="fas fa-th"></i> All</div>`;
+            const allCount = allAgents.length;
+            container.innerHTML = `<div class="category-chip active" data-category="all" onclick="filterByCategory('all')"><i class="fas fa-th"></i> All (${allCount})</div>`;
+            // Count agents per category
+            const catCounts = {};
+            allAgents.forEach(a => { catCounts[a.category] = (catCounts[a.category] || 0) + 1; });
             Object.entries(categories).forEach(([key, cat]) => {
+                const count = catCounts[key] || 0;
                 const chip = document.createElement('div');
                 chip.className = 'category-chip';
                 chip.dataset.category = key;
-                chip.style.setProperty('--chip-color', cat.color);
+                chip.style.setProperty('--chip-color', cat.color || '#8b949e');
                 chip.onclick = () => filterByCategory(key);
-                chip.innerHTML = `<i class="fas fa-${getIconForCategory(cat.icon)}"></i> ${cat.name}`;
+                chip.innerHTML = `<i class="fas fa-${getIconForCategory(cat.icon)}"></i> ${cat.name} (${count})`;
                 container.appendChild(chip);
             });
         }
 
         function getIconForCategory(icon) {
-            const iconMap = { 'code': 'code', 'shield-check': 'shield-alt', 'palette': 'palette', 'lightbulb': 'lightbulb', 'megaphone': 'bullhorn', 'settings': 'cog', 'chart-bar': 'chart-bar', 'cube': 'cube', 'search': 'search' };
-            return iconMap[icon] || 'circle';
+            const iconMap = { 'code': 'code', 'shield-check': 'shield-alt', 'palette': 'palette', 'lightbulb': 'lightbulb', 'megaphone': 'bullhorn', 'settings': 'cog', 'chart-bar': 'chart-bar', 'cube': 'cube', 'search': 'search', 'tasks': 'tasks', 'star': 'star', 'headset': 'headset', 'vial': 'vial', 'bullhorn': 'bullhorn', 'circle': 'circle' };
+            return iconMap[icon] || icon || 'circle';
         }
 
         function renderAgents() {
@@ -3129,25 +3166,31 @@
             const searchTerm = document.getElementById('agentSearch').value.toLowerCase();
             let filteredAgents = allAgents;
             if (activeCategory !== 'all') filteredAgents = filteredAgents.filter(a => a.category === activeCategory);
-            if (searchTerm) filteredAgents = filteredAgents.filter(a => a.name.toLowerCase().includes(searchTerm) || a.description.toLowerCase().includes(searchTerm) || a.tags.some(t => t.includes(searchTerm)));
+            if (searchTerm) filteredAgents = filteredAgents.filter(a => a.name.toLowerCase().includes(searchTerm) || (a.description || '').toLowerCase().includes(searchTerm) || a.category.includes(searchTerm));
             if (!filteredAgents.length) {
-                grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 60px; color: var(--text-secondary);">No agents found</div>';
+                grid.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 60px; color: var(--text-secondary);"><i class="fas fa-robot" style="font-size: 48px; margin-bottom: 16px; display: block; opacity: 0.3;"></i>No agents found</div>';
                 return;
             }
             grid.innerHTML = filteredAgents.map(agent => {
-                const config = projectConfig?.agents?.[agent.id] || { enabled: agent.default_enabled };
-                const category = categories[agent.category] || {};
-                const isEnabled = config.enabled;
+                const isEnabled = agent.enabled;
+                const catMeta = categories[agent.category] || {};
+                const catColor = catMeta.color || agent.color || '#8b949e';
+                const scopeClass = agent.scope === 'global' ? 'scope-global' : 'scope-project';
+                const scopeLabel = agent.scope === 'global' ? 'Global' : 'Project';
+                const catLabel = (catMeta.name || agent.category || '').replace(/-/g, ' ');
                 return `
                     <div class="agent-card ${isEnabled ? '' : 'disabled'}">
-                        <div class="agent-category-label" style="background: ${category.color || '#58a6ff'}"></div>
+                        <div class="agent-category-label" style="background: ${catColor}"></div>
                         <div class="agent-card-header">
-                            <div class="agent-icon" style="background: ${category.color}20; color: ${category.color}"><i class="fas fa-${getIconForCategory(category.icon)}"></i></div>
+                            <div class="agent-icon" style="background: ${catColor}20; color: ${catColor}"><i class="fas fa-${getIconForCategory(catMeta.icon)}"></i></div>
                             <div class="agent-toggle ${isEnabled ? 'active' : ''}" onclick="toggleAgent('${agent.id}', ${!isEnabled})"></div>
                         </div>
                         <div class="agent-name">${agent.name}</div>
-                        <div class="agent-description">${agent.description}</div>
-                        <div class="agent-tags">${agent.tags.slice(0, 4).map(tag => `<span class="agent-tag">${tag}</span>`).join('')}</div>
+                        <div class="agent-description">${agent.description || 'No description'}</div>
+                        <div class="agent-badges">
+                            <span class="agent-badge ${scopeClass}">${scopeLabel}</span>
+                            <span class="agent-badge category-badge">${catLabel}</span>
+                        </div>
                     </div>
                 `;
             }).join('');
@@ -3197,18 +3240,18 @@
 
         // Toggle actions
         async function toggleAgent(agentId, enabled) {
-            if (!currentProject) return;
             try {
-                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/agent/${agentId}`, {
+                const response = await fetch(`${API_URL}/api/agents/${agentId}/toggle`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ enabled })
+                    body: JSON.stringify({ enabled, project_path: currentProject || undefined })
                 });
                 const result = await response.json();
                 if (result.success) {
-                    await loadProjectConfig();
-                    renderAgents();
+                    await loadAgentData();
                     showToast(`${agentId} ${enabled ? 'enabled' : 'disabled'}`, 'success');
+                } else {
+                    showToast(result.error || 'Failed to toggle agent', 'error');
                 }
             } catch (e) {
                 showToast('Failed to update agent', 'error');
@@ -3254,21 +3297,28 @@
         }
 
         async function enableAllAgents(enabled) {
-            if (!currentProject) return;
-            const updates = {};
-            allAgents.forEach(agent => { updates[agent.id] = enabled; });
+            // Filter to only agents that need toggling
+            const toToggle = allAgents.filter(a => a.enabled !== enabled);
+            if (!toToggle.length) {
+                showToast(`All agents already ${enabled ? 'enabled' : 'disabled'}`, 'info');
+                return;
+            }
             try {
-                const response = await fetch(`${API_URL}/api/project/${encodeURIComponent(currentProject)}/agents/bulk`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ updates })
-                });
-                const result = await response.json();
-                if (result.success) {
-                    await loadProjectConfig();
-                    renderAgents();
-                    showToast(`All agents ${enabled ? 'enabled' : 'disabled'}`, 'success');
+                let succeeded = 0;
+                // Toggle in batches of 5 for reasonable concurrency
+                for (let i = 0; i < toToggle.length; i += 5) {
+                    const batch = toToggle.slice(i, i + 5);
+                    const results = await Promise.all(batch.map(agent =>
+                        fetch(`${API_URL}/api/agents/${agent.id}/toggle`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ enabled, project_path: currentProject || undefined })
+                        }).then(r => r.json())
+                    ));
+                    succeeded += results.filter(r => r.success).length;
                 }
+                await loadAgentData();
+                showToast(`${succeeded} agents ${enabled ? 'enabled' : 'disabled'}`, 'success');
             } catch (e) {
                 showToast('Failed to update agents', 'error');
             }

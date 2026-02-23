@@ -81,7 +81,7 @@ class EmbeddingCache:
             'hits': self._hits,
             'misses': self._misses,
             'hit_rate': round(self._hits / total, 4) if total > 0 else 0.0,
-            'estimated_memory_mb': round(len(self._cache) * 768 * 4 / 1024 / 1024, 2)
+            'estimated_memory_mb': round(len(self._cache) * config.get("EMBEDDING_DIM", 1024) * 4 / 1024 / 1024, 2)
         }
 
 

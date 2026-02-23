@@ -111,11 +111,15 @@ from services.claude_md_sync import get_claude_md_sync
 # Cross-session awareness
 from services.session_awareness import get_session_awareness
 
+# Soul layer — persistent personality and learning
+from services.soul import SoulService
+
 # Agent registry for dashboard
 from services.agent_registry import (
     AVAILABLE_AGENTS, AVAILABLE_MCPS, AVAILABLE_HOOKS,
     AGENT_CATEGORIES, get_agents_by_category, get_agent_by_id,
-    load_configured_hooks, load_configured_mcps
+    load_configured_hooks, load_configured_mcps,
+    discover_agents, discover_categories, find_agent_by_id, toggle_agent
 )
 
 load_dotenv()
@@ -186,6 +190,7 @@ metrics = OperationMetrics()
 
 # Initialize services
 db = DatabaseService()
+soul_service = SoulService(db)
 from config import config as _cfg
 embeddings = EmbeddingService(
     provider_type=_cfg.EMBEDDING_PROVIDER,
@@ -329,7 +334,7 @@ async def lifespan(app: FastAPI):
         from services.terminal_ui import print_splash, setup_rich_logging
 
         print_splash(
-            version="2.4.0",
+            version="3.0.1",
             port=int(os.getenv("PORT", 8102)),
             auth_enabled=auth_stats.get("enabled", False),
             auth_keys=auth_stats.get("active_keys", 0),
@@ -348,7 +353,7 @@ async def lifespan(app: FastAPI):
 
     except ImportError:
         # Fallback to plain output if rich unavailable
-        print(f"Memory Agent v2.4.0 (CLaRa) started on port {os.getenv('PORT', 8102)}")
+        print(f"Memory Agent v3.0.1 (CLaRa) started on port {os.getenv('PORT', 8102)}")
         if auth_stats.get("enabled"):
             print(f"Authentication: ENABLED ({auth_stats.get('active_keys', 0)} active keys)")
         else:
@@ -375,7 +380,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Claude Memory Agent",
     description="Persistent semantic memory for Claude Code sessions with cross-project support",
-    version="2.4.0",
+    version="3.0.1",
     lifespan=lifespan
 )
 
@@ -1773,6 +1778,37 @@ async def _handle_session_append_file(query, params, session_id):
 
 
 # ============================================================
+# SOUL LAYER SKILL HANDLERS
+# ============================================================
+
+async def _handle_soul_brief(query, params, session_id):
+    project_path = params.get("project_path", "")
+    brief = await soul_service.generate_soul_brief(project_path)
+    return {"success": True, "brief": brief}
+
+async def _handle_soul_capture(query, params, session_id):
+    sid = params.get("session_id") or session_id or ""
+    project_path = params.get("project_path", "")
+    fragment_type = params.get("fragment_type", "")
+    content = params.get("content", "")
+    if not fragment_type or not content:
+        return {"success": False, "error": "fragment_type and content required"}
+    frag_id = await soul_service.capture_soul_fragment(
+        session_id=sid,
+        fragment_type=fragment_type,
+        content=content,
+        project_path=project_path,
+    )
+    return {"success": frag_id is not None, "fragment_id": frag_id}
+
+async def _handle_soul_integrate(query, params, session_id):
+    sid = params.get("session_id") or session_id or ""
+    project_path = params.get("project_path", "")
+    result = await soul_service.run_soul_integration(sid, project_path)
+    return {"success": True, **result}
+
+
+# ============================================================
 # SKILL DISPATCH TABLE
 # ============================================================
 # Maps skill_id strings to their async handler functions.
@@ -1928,6 +1964,11 @@ SKILL_DISPATCH = {
     "session_conflicts": _handle_session_conflicts,
     "session_post_activity": _handle_session_post_activity,
     "session_append_file": _handle_session_append_file,
+
+    # Soul Layer
+    "soul_brief": _handle_soul_brief,
+    "soul_capture": _handle_soul_capture,
+    "soul_integrate": _handle_soul_integrate,
 }
 
 
@@ -2139,6 +2180,176 @@ async def api_get_timeline(
     except Exception as e:
         logger.error(f"Failed to get timeline: {e}")
         return {"success": False, "error": str(e), "events": []}
+
+
+# ---------------------------------------------------------------------------
+# REST write endpoints (POST/DELETE) for memories, patterns, timeline
+# These allow the dashboard and external tools to create/delete data
+# without going through the skill dispatch system.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/memories")
+async def api_create_memory(request: Request):
+    """Create a new memory via REST API."""
+    try:
+        body = await request.json()
+        content = body.get("content")
+        if not content:
+            return {"success": False, "error": "content is required"}
+
+        result = await store_memory(
+            db=db,
+            embeddings=embeddings,
+            content=content,
+            memory_type=body.get("type", "chunk"),
+            metadata=body.get("metadata"),
+            session_id=body.get("session_id"),
+            project_path=body.get("project_path"),
+            project_name=body.get("project_name"),
+            project_type=body.get("project_type"),
+            tech_stack=body.get("tech_stack"),
+            agent_type=body.get("agent_type"),
+            tags=body.get("tags"),
+            importance=body.get("importance", 5),
+            confidence=body.get("confidence", 0.5),
+            outcome=body.get("outcome"),
+            success=body.get("success"),
+        )
+        try:
+            await broadcast_event(
+                EventTypes.MEMORY_STORED,
+                {"memory_id": result.get("memory_id"), "type": body.get("type", "chunk")},
+                body.get("project_path")
+            )
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        logger.error(f"Failed to create memory: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/api/memory/{memory_id}")
+async def api_delete_memory(memory_id: str):
+    """Delete a memory by ID."""
+    try:
+        existing = await db.execute_query(
+            "SELECT id FROM memories WHERE id = ?", [memory_id]
+        )
+        if not existing:
+            return {"success": False, "error": "Memory not found"}
+
+        await db.execute_write("DELETE FROM memories WHERE id = ?", [memory_id])
+        try:
+            await broadcast_event(
+                EventTypes.MEMORY_STORED,
+                {"memory_id": memory_id, "action": "deleted"},
+                None
+            )
+        except Exception:
+            pass
+        return {"success": True, "deleted": memory_id}
+    except Exception as e:
+        logger.error(f"Failed to delete memory: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/patterns")
+async def api_create_pattern(request: Request):
+    """Create a new solution pattern via REST API."""
+    try:
+        body = await request.json()
+        name = body.get("name")
+        solution = body.get("solution")
+        if not name or not solution:
+            return {"success": False, "error": "name and solution are required"}
+
+        result = await store_pattern(
+            db=db,
+            embeddings=embeddings,
+            name=name,
+            solution=solution,
+            problem_type=body.get("problem_type"),
+            tech_context=body.get("tech_context"),
+            metadata=body.get("metadata"),
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Failed to create pattern: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/timeline")
+async def api_create_timeline_event(request: Request):
+    """Create a timeline event via REST API."""
+    try:
+        body = await request.json()
+        summary = body.get("summary")
+        if not summary:
+            return {"success": False, "error": "summary is required"}
+
+        result = await timeline_log(
+            db=db,
+            embeddings=embeddings,
+            session_id=body.get("session_id", str(uuid.uuid4())),
+            event_type=body.get("event_type", "observation"),
+            summary=summary,
+            details=body.get("details"),
+            project_path=body.get("project_path"),
+            parent_event_id=body.get("parent_event_id"),
+            root_event_id=body.get("root_event_id"),
+            entities=body.get("entities"),
+            status=body.get("status", "completed"),
+            outcome=body.get("outcome"),
+            confidence=body.get("confidence"),
+            is_anchor=body.get("is_anchor", False),
+        )
+        try:
+            await broadcast_event(
+                EventTypes.TIMELINE_LOGGED,
+                {"event_id": result.get("event_id"), "event_type": body.get("event_type", "observation")},
+                body.get("project_path")
+            )
+        except Exception:
+            pass
+        return result
+    except Exception as e:
+        logger.error(f"Failed to create timeline event: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/api/timeline/{event_id}")
+async def api_delete_timeline_event(event_id: str):
+    """Delete a timeline event by ID."""
+    try:
+        existing = await db.execute_query(
+            "SELECT id FROM timeline_events WHERE id = ?", [event_id]
+        )
+        if not existing:
+            return {"success": False, "error": "Timeline event not found"}
+
+        await db.execute_write("DELETE FROM timeline_events WHERE id = ?", [event_id])
+        return {"success": True, "deleted": event_id}
+    except Exception as e:
+        logger.error(f"Failed to delete timeline event: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.delete("/api/pattern/{pattern_id}")
+async def api_delete_pattern(pattern_id: str):
+    """Delete a pattern by ID."""
+    try:
+        existing = await db.execute_query(
+            "SELECT id FROM patterns WHERE id = ?", [pattern_id]
+        )
+        if not existing:
+            return {"success": False, "error": "Pattern not found"}
+
+        await db.execute_write("DELETE FROM patterns WHERE id = ?", [pattern_id])
+        return {"success": True, "deleted": pattern_id}
+    except Exception as e:
+        logger.error(f"Failed to delete pattern: {e}")
+        return {"success": False, "error": str(e)}
 
 
 @app.get("/dashboard")
@@ -2680,12 +2891,12 @@ async def health_check():
 
     return {
         "status": status,
-        "version": "2.0.0",
+        "version": "3.0.1",
         "timestamp": datetime.now().isoformat(),
         "components": {
             "agent": {
                 "healthy": True,
-                "version": "2.0.0"
+                "version": "3.0.1"
             },
             "database": {
                 "healthy": db_healthy,
@@ -4192,15 +4403,39 @@ async def api_mark_insight_applied(insight_id: int):
 # ============= Agent Configuration API =============
 
 @app.get("/api/agents")
-async def get_all_agents():
-    """Get all available agents with categories."""
+async def get_all_agents(project_path: Optional[str] = None):
+    """Get all discovered agents from disk with categories."""
+    agents = discover_agents(project_path)
+    categories = discover_categories(agents)
+    enabled_count = sum(1 for a in agents if a["enabled"])
     return {
         "success": True,
-        "agents": AVAILABLE_AGENTS,
-        "categories": AGENT_CATEGORIES,
-        "by_category": get_agents_by_category(),
-        "total": len(AVAILABLE_AGENTS)
+        "agents": agents,
+        "categories": categories,
+        "by_category": get_agents_by_category(agents),
+        "total": len(agents),
+        "enabled": enabled_count,
     }
+
+
+@app.post("/api/agents/{agent_id}/toggle")
+async def toggle_agent_endpoint(agent_id: str, request: Request):
+    """Toggle an agent between enabled/disabled by moving files on disk."""
+    try:
+        body = await request.json()
+        enabled = body.get("enabled", False)
+        project_path = body.get("project_path")
+
+        agent = toggle_agent(agent_id, enabled, project_path)
+        return {
+            "success": True,
+            "agent": agent,
+        }
+    except FileNotFoundError as e:
+        return {"success": False, "error": str(e)}
+    except Exception as e:
+        logger.error(f"Error toggling agent {agent_id}: {e}")
+        return {"success": False, "error": str(e)}
 
 
 @app.get("/api/mcps")
@@ -4265,7 +4500,8 @@ async def get_project_config(project_path: str):
             (project_path,)
         )
 
-        # Build agent status map (enabled/disabled)
+        # Build agent status map from disk discovery
+        live_agents = discover_agents(project_path)
         agent_status = {}
         for config in (agent_configs or []):
             agent_status[config['agent_id']] = {
@@ -4274,12 +4510,12 @@ async def get_project_config(project_path: str):
                 'settings': json.loads(config['settings']) if config['settings'] else {}
             }
 
-        # Fill in defaults for unconfigured agents
-        for agent in AVAILABLE_AGENTS:
+        # Fill in defaults for agents not in DB config
+        for agent in live_agents:
             if agent['id'] not in agent_status:
                 agent_status[agent['id']] = {
-                    'enabled': agent['default_enabled'],
-                    'priority': agent['priority'],
+                    'enabled': agent['enabled'],
+                    'priority': 5,
                     'settings': {}
                 }
 
@@ -4332,7 +4568,7 @@ async def get_project_config(project_path: str):
             "hooks": hook_status,
             "stats": {
                 "enabled_agents": sum(1 for a in agent_status.values() if a['enabled']),
-                "total_agents": len(AVAILABLE_AGENTS),
+                "total_agents": len(live_agents),
                 "enabled_mcps": sum(1 for m in mcp_status.values() if m.get('enabled')),
                 "total_mcps": len(live_mcps),
                 "configured_mcps": sum(1 for m in mcp_status.values() if m.get('configured')),
@@ -5472,6 +5708,60 @@ async def api_post_session_activity(request: Request):
         )
     except Exception as e:
         logger.error(f"Post session activity failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# ============= Soul Layer REST Endpoints =============
+
+
+@app.get("/api/soul/brief")
+async def api_soul_brief(project_path: str = ""):
+    """Get the soul brief for a project."""
+    try:
+        brief = await soul_service.generate_soul_brief(project_path)
+        return {"success": True, "brief": brief}
+    except Exception as e:
+        logger.error(f"Soul brief failed: {e}")
+        return {"success": False, "error": str(e), "brief": ""}
+
+
+@app.post("/api/soul/capture")
+async def api_soul_capture(request: Request):
+    """Capture a soul fragment from a session response."""
+    try:
+        body = await request.json()
+        session_id = body.get("session_id", "")
+        project_path = body.get("project_path", "")
+        fragment_type = body.get("fragment_type", "")
+        content = body.get("content", "")
+
+        if not fragment_type or not content:
+            return {"success": False, "error": "fragment_type and content required"}
+
+        frag_id = await soul_service.capture_soul_fragment(
+            session_id=session_id,
+            fragment_type=fragment_type,
+            content=content,
+            project_path=project_path,
+        )
+        return {"success": frag_id is not None, "fragment_id": frag_id}
+    except Exception as e:
+        logger.error(f"Soul capture failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/soul/integrate")
+async def api_soul_integrate(request: Request):
+    """Run soul integration for a session — merges fragments into soul_state."""
+    try:
+        body = await request.json()
+        session_id = body.get("session_id", "")
+        project_path = body.get("project_path", "")
+
+        result = await soul_service.run_soul_integration(session_id, project_path)
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error(f"Soul integration failed: {e}")
         return {"success": False, "error": str(e)}
 
 

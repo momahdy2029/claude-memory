@@ -180,6 +180,12 @@ async def memory_ask(
         elif label == "sessions":
             results["active_sessions"] = result.get("sessions", [])
 
+    # -- Soul context enrichment (lightweight DB read) --
+    if project_path:
+        soul_data = await _rest_get("/api/soul/brief", {"project_path": project_path})
+        if soul_data and soul_data.get("brief"):
+            results["soul_context"] = {"brief": soul_data["brief"]}
+
     results["success"] = bool(results.get("memories") or results.get("patterns"))
     return json.dumps(results, default=str)
 

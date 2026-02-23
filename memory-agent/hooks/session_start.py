@@ -87,6 +87,16 @@ async def load_session_context(project_path: str) -> str:
     context_parts = []
 
     # ============================================================
+    # SOUL LAYER: Load soul brief (personality + learning context)
+    # ============================================================
+    soul_brief = await call_rest_api("GET", "/api/soul/brief", params={
+        "project_path": project_path,
+    })
+
+    if soul_brief and soul_brief.get("success") and soul_brief.get("brief"):
+        context_parts.append(soul_brief["brief"])
+
+    # ============================================================
     # CROSS-SESSION AWARENESS: Register this session + catch-up
     # ============================================================
     session_id = SESSION_ID or os.getenv("CLAUDE_SESSION_ID", "")

@@ -1,13 +1,22 @@
-"""Start the memory agent as a proper background daemon on Windows.
+"""Start the memory agent as a proper background daemon.
 
-Uses msvcrt.locking() for a true Windows mutex to prevent multiple
-simultaneous startup attempts. The server itself has its own mutex.
+Uses platform-appropriate file locking to prevent multiple simultaneous
+startup attempts. The server itself has its own mutex.
+- Windows: msvcrt.locking()
+- macOS/Linux: fcntl.flock()
 """
 import subprocess
 import sys
 import os
 import time
-import msvcrt
+import platform
+
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    import msvcrt
+else:
+    import fcntl
 
 AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(AGENT_DIR, "memory-agent.log")
@@ -19,10 +28,13 @@ _startup_lock_handle = None
 
 
 def acquire_startup_lock() -> bool:
-    """Acquire startup mutex using Windows file locking (msvcrt.locking).
+    """Acquire startup mutex using platform-appropriate file locking.
 
     This prevents multiple hooks from trying to start the agent simultaneously.
     The lock is held until release_startup_lock() is called.
+
+    Windows: msvcrt.locking() with LK_NBLCK
+    macOS/Linux: fcntl.flock() with LOCK_EX | LOCK_NB
     """
     global _startup_lock_handle
 
@@ -32,7 +44,10 @@ def acquire_startup_lock() -> bool:
 
         # Try non-blocking exclusive lock
         try:
-            msvcrt.locking(_startup_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            if IS_WINDOWS:
+                msvcrt.locking(_startup_lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(_startup_lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except (IOError, OSError):
             # Lock held by another process - they're already starting the agent
             _startup_lock_handle.close()
@@ -64,7 +79,10 @@ def release_startup_lock():
     try:
         if _startup_lock_handle:
             try:
-                msvcrt.locking(_startup_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                if IS_WINDOWS:
+                    msvcrt.locking(_startup_lock_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(_startup_lock_handle.fileno(), fcntl.LOCK_UN)
             except:
                 pass
             _startup_lock_handle.close()
@@ -76,10 +94,12 @@ def release_startup_lock():
 def is_running():
     """Check if agent is already running via health endpoint."""
     try:
-        import requests
+        from urllib.request import urlopen, Request
+        from urllib.error import URLError
         url = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
-        r = requests.get(f"{url}/health", timeout=2)
-        return r.status_code == 200
+        req = Request(f"{url}/health")
+        response = urlopen(req, timeout=2)
+        return response.status == 200
     except Exception:
         return False
 
@@ -115,19 +135,30 @@ def start_daemon():
         return False
 
     try:
-        # Windows-specific flags for detached process
-        DETACHED_PROCESS = 0x00000008
-        CREATE_NO_WINDOW = 0x08000000
-        CREATE_NEW_PROCESS_GROUP = 0x00000200
-
         with open(LOG_FILE, "w") as log:
-            proc = subprocess.Popen(
-                [sys.executable, "run_server.py"],
+            popen_kwargs = dict(
                 cwd=AGENT_DIR,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-                close_fds=True
+            )
+
+            if IS_WINDOWS:
+                # Windows-specific flags for detached process
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NO_WINDOW = 0x08000000
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                popen_kwargs["creationflags"] = (
+                    DETACHED_PROCESS | CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+                )
+                popen_kwargs["close_fds"] = True
+            else:
+                # Unix: start in a new session so the process is detached
+                popen_kwargs["start_new_session"] = True
+                popen_kwargs["close_fds"] = True
+
+            proc = subprocess.Popen(
+                [sys.executable, "run_server.py"],
+                **popen_kwargs
             )
 
             # Save PID for future reference
