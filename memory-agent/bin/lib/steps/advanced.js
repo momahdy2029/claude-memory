@@ -44,7 +44,7 @@ async function promptAdvanced() {
     });
 
     const dbPath = await input({
-        message: 'Database path (leave empty for agent directory):',
+        message: 'Database path (leave empty for ~/.claude-memory/):',
         default: '',
     });
 

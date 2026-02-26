@@ -17,7 +17,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configuration
-QUEUE_DB_PATH = os.getenv("QUEUE_DB_PATH", str(Path(__file__).parent.parent / "queue.db"))
+try:
+    from config import USER_DATA_DIR as _DATA_DIR
+except ImportError:
+    _DATA_DIR = Path.home() / ".claude-memory"
+QUEUE_DB_PATH = os.getenv("QUEUE_DB_PATH", str(_DATA_DIR / "queue.db"))
 QUEUE_FILE_FALLBACK = os.getenv("QUEUE_FILE_FALLBACK", str(Path.home() / ".claude" / "memory_queue.jsonl"))
 MAX_RETRIES = int(os.getenv("QUEUE_MAX_RETRIES", "5"))
 BASE_BACKOFF_SECONDS = float(os.getenv("QUEUE_BASE_BACKOFF", "1.0"))

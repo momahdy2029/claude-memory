@@ -66,10 +66,23 @@ PATTERN_PATTERNS = [
     re.compile(r"(?:^|\n)\s*(?:Always|Never|Should always|Should never|Must always|Must never) (.*?)(?:\.|$)", re.IGNORECASE | re.MULTILINE),
 ]
 
+# Workflow/procedure patterns
+WORKFLOW_PATTERNS = [
+    # "To build X, run Y" / "To deploy X, do Y"
+    re.compile(r"(?:^|\n)\s*(?:To|to) (\w[\w\s]{3,30}),\s*(?:run|do|use|execute|type) (.{10,}?)(?:\n|$)", re.IGNORECASE | re.MULTILINE),
+    # "learned how to..."
+    re.compile(r"(?:^|\n)\s*(?:I learned|We learned|learned how to|figured out how to) (.{20,}?)(?:\.|$)", re.IGNORECASE | re.MULTILINE),
+    # Step-by-step: "1. ...\n2. ...\n3. ..."
+    re.compile(r"(?:^|\n)\s*1[.)]\s+(.+)\n\s*2[.)]\s+(.+)\n\s*3[.)]\s+(.+)", re.MULTILINE),
+    # "The workflow is..." / "The process is..."
+    re.compile(r"(?:^|\n)\s*(?:The workflow|The process|The procedure|Steps to) (?:is|are|for)[:\s]+(.*?)(?:\n\n|\Z)", re.IGNORECASE | re.DOTALL),
+]
+
 # Broader keyword triggers (used for line-level scanning)
 DECISION_KEYWORDS = {"decided", "let's use", "going with", "chose", "choosing", "will use", "the plan is", "approach is", "strategy is", "i'll implement", "we'll implement"}
 ERROR_KEYWORDS = {"error", "bug", "fix", "issue", "traceback", "exception", "failed", "failure", "broken", "crash", "root cause"}
 PATTERN_KEYWORDS = {"pattern", "approach", "architecture", "convention", "best practice", "always", "never", "rule"}
+WORKFLOW_KEYWORDS = {"workflow", "procedure", "steps to", "how to", "process for", "pipeline", "build steps", "deploy steps"}
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +237,13 @@ def extract_from_text(text: str, existing_hashes: set) -> List[Dict[str, Any]]:
             if len(context) > 30:
                 add_extraction(context, "code", 6, ["pattern"])
 
+    # Workflows / Procedures
+    for pattern in WORKFLOW_PATTERNS:
+        for match in pattern.finditer(text):
+            context = extract_context_around(text, match.start(), match.end(), context_chars=300)
+            if len(context) > 40:
+                add_extraction(context, "code", 7, ["workflow", "procedure"])
+
     # --- Line-level keyword scanning (fallback for cases regex misses) ---
     # Only do this if we have not yet hit our cap
     if len(extractions) < MAX_MEMORIES_PER_RUN:
@@ -255,6 +275,12 @@ def extract_from_text(text: str, existing_hashes: set) -> List[Dict[str, Any]]:
                 block = '\n'.join(lines[i:i+3]).strip()
                 if len(block) > 30:
                     add_extraction(block, "code", 5, ["pattern", "keyword-match"])
+
+            # Check for workflow keywords
+            elif any(kw in line_lower for kw in WORKFLOW_KEYWORDS):
+                block = '\n'.join(lines[i:i+5]).strip()  # Wider context for workflows
+                if len(block) > 40:
+                    add_extraction(block, "code", 6, ["workflow", "keyword-match"])
 
             i += 1
 
@@ -306,6 +332,84 @@ def store_memory_sync(extraction: Dict[str, Any], project_path: Optional[str] = 
             data=data,
             headers=headers,
             method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, OSError, TimeoutError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Workflow / Bash command extraction from JSONL transcript
+# ---------------------------------------------------------------------------
+
+def extract_bash_commands(transcript_path: str, byte_offset: int = 0) -> List[str]:
+    """Extract successful bash commands from JSONL transcript.
+
+    Looks for tool_use blocks with tool=Bash that were followed by success results.
+    Returns deduplicated command list.
+    """
+    path = Path(transcript_path)
+    if not path.exists():
+        return []
+
+    commands = []
+    seen = set()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            if byte_offset > 0:
+                f.seek(byte_offset)
+                f.readline()  # skip partial line
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    content = msg.get("content", [])
+                    if not isinstance(content, list):
+                        continue
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        if part.get("type") == "tool_use" and part.get("name") == "Bash":
+                            cmd = ""
+                            inp = part.get("input", {})
+                            if isinstance(inp, dict):
+                                cmd = inp.get("command", "")
+                            if cmd and len(cmd) > 5 and cmd not in seen:
+                                # Skip trivial commands
+                                if not cmd.strip().startswith(("ls", "pwd", "echo", "cat ")):
+                                    seen.add(cmd)
+                                    commands.append(cmd)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+    except OSError:
+        pass
+    return commands[-20:]  # Keep last 20 commands
+
+
+def capture_workflow_sync(name: str, steps: List[str], commands: List[str],
+                          project_path: Optional[str] = None) -> bool:
+    """POST a captured workflow to /api/workflow/capture."""
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({
+        "name": name,
+        "steps": steps,
+        "commands": commands,
+        "project_path": project_path or "",
+    }).encode("utf-8")
+
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-Memory-Key"] = API_KEY
+
+    try:
+        req = urllib.request.Request(
+            f"{MEMORY_AGENT_URL}/api/workflow/capture",
+            data=payload, headers=headers, method="POST",
         )
         with urllib.request.urlopen(req, timeout=2) as resp:
             return resp.status == 200

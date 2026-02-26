@@ -44,10 +44,12 @@ MEMORY_AGENT_URL = os.getenv("MEMORY_AGENT_URL", "http://localhost:8102")
 API_KEY = os.getenv("MEMORY_API_KEY", "")
 CURSOR_DIR = Path.home() / ".claude"
 CURSOR_FILE = CURSOR_DIR / "memory-agent-cursor.json"
+RESPONSE_COUNTER_FILE = CURSOR_DIR / "memory-agent-response-counter.json"
 MAX_MEMORIES_PER_STOP = 2        # Hard cap -- stay fast
 MAX_CONTENT_LENGTH = 500         # Truncate for storage
 API_TIMEOUT_SECONDS = 1.5        # Tight timeout for API calls
 TOTAL_TIME_BUDGET = 2.0          # Total wall-clock budget
+AUTO_CHECKPOINT_INTERVAL = 15    # Fire checkpoint every N responses
 
 # ---------------------------------------------------------------------------
 # High-signal extraction patterns (intentionally narrow)
@@ -422,6 +424,166 @@ def _capture_soul_fragments(
 
 
 # ---------------------------------------------------------------------------
+# Self-reported learning extraction (<!-- LEARNED: ... --> tags)
+# ---------------------------------------------------------------------------
+
+_LEARNED_TAG_RE = re.compile(
+    r"<!--\s*LEARNED:\s*(.+?)\s*-->",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_self_reported_learnings(
+    text: str, existing_hashes: set
+) -> List[Dict[str, Any]]:
+    """Extract <!-- LEARNED: ... --> tags that Claude self-reported.
+
+    These are high-confidence (Claude chose to report them) so they get
+    importance=8 and confidence=0.75 — higher than regex-guessed content.
+    """
+    extractions = []
+    seen = set(existing_hashes)
+
+    for m in _LEARNED_TAG_RE.finditer(text):
+        content = m.group(1).strip()
+        if len(content) < 10 or len(content) > 500:
+            continue
+        h = _content_hash(content)
+        if h in seen:
+            continue
+        seen.add(h)
+        extractions.append({
+            "content": content,
+            "type": "decision",
+            "importance": 8,
+            "tags": ["self-reported", "learned", "stop-hook"],
+            "hash": h,
+        })
+
+    return extractions[:3]  # Cap at 3 per response
+
+
+# ---------------------------------------------------------------------------
+# Response counter + auto-checkpoint (fire-and-forget)
+# ---------------------------------------------------------------------------
+
+def _increment_response_counter(session_id: str) -> int:
+    """Increment and return the response count for this session."""
+    try:
+        CURSOR_DIR.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if RESPONSE_COUNTER_FILE.exists():
+            try:
+                data = json.loads(RESPONSE_COUNTER_FILE.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        count = data.get(session_id, 0) + 1
+        data[session_id] = count
+        # Prune old sessions (keep 10)
+        if len(data) > 10:
+            for old_key in sorted(data.keys())[:-10]:
+                del data[old_key]
+        RESPONSE_COUNTER_FILE.write_text(json.dumps(data), encoding="utf-8")
+        return count
+    except OSError:
+        return 0
+
+
+def _fire_auto_checkpoint(session_id: str, project_path: str):
+    """Fire-and-forget checkpoint creation (1s timeout, silent fail)."""
+    import urllib.request
+    import urllib.error
+
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": f"auto-checkpoint-{session_id}-{int(time.time())}",
+        "method": "tasks/send",
+        "params": {
+            "message": {"parts": [{"type": "text", "text": ""}]},
+            "metadata": {
+                "skill_id": "checkpoint_create",
+                "params": {
+                    "session_id": session_id,
+                    "summary": f"Auto-checkpoint (periodic, every {AUTO_CHECKPOINT_INTERVAL} responses)",
+                },
+            },
+        },
+    }).encode("utf-8")
+
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-Memory-Key"] = API_KEY
+
+    try:
+        req = urllib.request.Request(
+            f"{MEMORY_AGENT_URL}/a2a",
+            data=payload, headers=headers, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=1.0)
+    except Exception:
+        pass  # Fire-and-forget
+
+
+# ---------------------------------------------------------------------------
+# Workflow pattern extraction (lightweight, runs on response text)
+# ---------------------------------------------------------------------------
+
+WORKFLOW_EXTRACT_PATTERNS = [
+    re.compile(
+        r"(?:^|\n)\s*(?:To|to) (\w[\w\s]{3,30}),\s*(?:run|do|use|execute) (.{10,}?)(?:\n|$)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"(?:^|\n)\s*(?:I learned|We learned|learned how to|figured out how to) (.{20,}?)(?:\.|$)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+]
+
+
+def _extract_and_capture_workflows(text: str, project_path: str):
+    """Extract workflow patterns from response text and POST to /api/workflow/capture.
+
+    Budget: < 200ms total. Non-blocking.
+    """
+    import urllib.request
+    import urllib.error
+
+    for pattern in WORKFLOW_EXTRACT_PATTERNS:
+        for match in pattern.finditer(text):
+            groups = match.groups()
+            if len(groups) >= 2:
+                name = groups[0].strip()[:60]
+                steps = [g.strip() for g in groups[1:] if g]
+            elif len(groups) == 1:
+                name = groups[0].strip()[:60]
+                steps = [groups[0].strip()]
+            else:
+                continue
+
+            if len(name) < 5:
+                continue
+
+            payload = json.dumps({
+                "name": name,
+                "steps": steps,
+                "commands": [],
+                "project_path": project_path,
+            }).encode("utf-8")
+
+            try:
+                req = urllib.request.Request(
+                    f"{MEMORY_AGENT_URL}/api/workflow/capture",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=0.5)
+            except Exception:
+                pass  # Silent failure
+            break  # Only capture first workflow match per response
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -443,6 +605,11 @@ def main():
         if not transcript_path or not session_id:
             sys.exit(0)
 
+        # --- Increment response counter + auto-checkpoint ---
+        response_count = _increment_response_counter(session_id)
+        if response_count > 0 and response_count % AUTO_CHECKPOINT_INTERVAL == 0:
+            _fire_auto_checkpoint(session_id, project_path)
+
         # --- Load existing hashes for dedup ---
         existing_hashes = _load_cursor_hashes(session_id)
 
@@ -451,23 +618,33 @@ def main():
         if not response_text or len(response_text) < 40:
             sys.exit(0)
 
-        # --- Extract high-signal content ---
+        # --- Extract self-reported learnings first (highest signal) ---
+        self_reported = _extract_self_reported_learnings(response_text, existing_hashes)
+
+        # --- Extract high-signal content (regex-based) ---
         extractions = _extract_high_signal(response_text, existing_hashes)
-        if not extractions:
-            sys.exit(0)
 
         # --- Store via API (with time budget) ---
+        # Self-reported learnings go first (higher priority)
         stored_hashes: List[str] = []
-        for extraction in extractions:
-            elapsed = time.time() - start
-            if elapsed >= TOTAL_TIME_BUDGET:
-                break
-            if _store_memory(extraction, project_path):
-                stored_hashes.append(extraction["hash"])
+        all_to_store = self_reported + extractions
 
-        # --- Persist new hashes to cursor file ---
-        if stored_hashes:
-            _save_cursor_hashes(session_id, stored_hashes)
+        if all_to_store:
+            for extraction in all_to_store:
+                elapsed = time.time() - start
+                if elapsed >= TOTAL_TIME_BUDGET:
+                    break
+                if _store_memory(extraction, project_path):
+                    stored_hashes.append(extraction["hash"])
+
+            # --- Persist new hashes to cursor file ---
+            if stored_hashes:
+                _save_cursor_hashes(session_id, stored_hashes)
+
+        # --- Workflow extraction (lightweight, adds ~100ms) ---
+        elapsed = time.time() - start
+        if elapsed < TOTAL_TIME_BUDGET - 0.3:
+            _extract_and_capture_workflows(response_text, project_path)
 
         # --- Soul fragment capture (lightweight, adds ~100ms) ---
         elapsed = time.time() - start
@@ -479,7 +656,8 @@ def main():
         elapsed_total = round(time.time() - start, 3)
         print(
             f"[Stop] session={session_id} "
-            f"found={len(extractions)} stored={len(stored_hashes)} "
+            f"learned={len(self_reported)} found={len(extractions)} stored={len(stored_hashes)} "
+            f"responses={response_count} "
             f"elapsed={elapsed_total}s",
             file=sys.stderr,
         )

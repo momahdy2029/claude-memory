@@ -32,10 +32,14 @@ VERSION_HISTORY = {
     "2.0.0": "Path normalization fix, cleanup system",
     "2.1.0": "Full feature set with confidence scoring",
     "2.2.0": "Outcome spectrum (pending/success/partial/failed/superseded)",
-    "2.3.0": "Current version - context tagging (worked_in/failed_in/context_confidence)",
+    "2.3.0": "Context tagging (worked_in/failed_in/context_confidence)",
+    "2.4.0": "CLaRa memory tiers, consolidation, markdown sync",
+    "2.5.0": "Cross-session awareness, MCP server, knowledge graph",
+    "3.0.0": "Slim MCP proxy, soul layer tables",
+    "3.1.0": "Database migration safety - user data in ~/.claude-memory/",
 }
 
-CURRENT_VERSION = "2.3.0"
+CURRENT_VERSION = "3.1.0"
 
 class Colors:
     """ANSI color codes for terminal output"""
@@ -807,13 +811,35 @@ def main():
     verbose = '--verbose' in sys.argv
     status_only = '--status' in sys.argv
 
-    # Find database
+    # Find database — check multiple locations in priority order
     script_dir = Path(__file__).parent
-    db_path = script_dir / "memories.db"
+    db_path = None
 
-    if not db_path.exists():
-        print_error(f"Database not found at {db_path}")
-        print_info("Make sure you're running this from the memory-agent directory")
+    # 1. DATABASE_PATH env var (explicit user config)
+    env_db = os.getenv("DATABASE_PATH")
+    if env_db and Path(env_db).exists():
+        db_path = Path(env_db)
+        print_info(f"Using database from DATABASE_PATH env: {db_path}")
+
+    # 2. ~/.claude-memory/memories.db (new default)
+    if db_path is None:
+        new_default = Path.home() / ".claude-memory" / "memories.db"
+        if new_default.exists():
+            db_path = new_default
+            print_info(f"Using database at new default location: {db_path}")
+
+    # 3. script_dir/memories.db (old fallback)
+    if db_path is None:
+        old_fallback = script_dir / "memories.db"
+        if old_fallback.exists():
+            db_path = old_fallback
+            print_info(f"Using database at old location: {db_path}")
+
+    if db_path is None:
+        print_error("Database not found at any known location:")
+        print_info(f"  - DATABASE_PATH env var: {env_db or '(not set)'}")
+        print_info(f"  - {Path.home() / '.claude-memory' / 'memories.db'}")
+        print_info(f"  - {script_dir / 'memories.db'}")
         sys.exit(1)
 
     manager = MigrationManager(str(db_path), dry_run=dry_run, verbose=verbose)

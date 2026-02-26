@@ -11,6 +11,8 @@ Features:
 """
 import os
 import json
+import glob as globmod
+import shutil
 import sqlite3
 import numpy as np
 import logging
@@ -36,7 +38,13 @@ if not logger.handlers:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
 
-DB_PATH = os.getenv("DATABASE_PATH", str(Path(__file__).parent.parent / "memories.db"))
+try:
+    from config import USER_DATA_DIR as _DATA_DIR
+except ImportError:
+    _DATA_DIR = Path.home() / ".claude-memory"
+DB_PATH = os.getenv("DATABASE_PATH", str(_DATA_DIR / "memories.db"))
+_AGENT_DIR = Path(__file__).parent.parent.resolve()
+SCHEMA_VERSION = "3.1.0"
 USE_VECTOR_INDEX = os.getenv("USE_VECTOR_INDEX", "true").lower() == "true"
 
 # Connection pool settings
@@ -354,9 +362,110 @@ class DatabaseService:
                 logger.error(f"Rollback failed: {rollback_err}")
             raise
 
+    def _auto_migrate_data_location(self):
+        """Migrate data files from old code-dir location to USER_DATA_DIR.
+
+        Called at start of connect() before opening connections.
+        Copies (not moves) files so rollback is safe — user can delete originals.
+        Each data file (memories.db, queue.db, indexes/) is migrated independently.
+        """
+        target_db = Path(self.db_path)
+        target_dir = target_db.parent
+        old_db = _AGENT_DIR / "memories.db"
+
+        # Skip if target IS the old location (custom env pointing to agent dir)
+        if target_dir.resolve() == _AGENT_DIR.resolve():
+            return
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        # Migrate memories.db if target doesn't exist but old location has it
+        if not target_db.exists() and old_db.exists():
+            logger.info(f"Auto-migrating memories.db from {_AGENT_DIR} to {target_dir}")
+            try:
+                # Checkpoint WAL for a clean copy
+                try:
+                    tmp_conn = sqlite3.connect(str(old_db))
+                    tmp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    tmp_conn.close()
+                except Exception as e:
+                    logger.warning(f"WAL checkpoint before migration failed (non-fatal): {e}")
+
+                shutil.copy2(str(old_db), str(target_db))
+                logger.info(f"Migrated memories.db -> {target_db}")
+
+                # Copy WAL/SHM files (if checkpoint didn't fully flush)
+                for suffix in ["-wal", "-shm"]:
+                    old_wal = _AGENT_DIR / f"memories.db{suffix}"
+                    if old_wal.exists():
+                        shutil.copy2(str(old_wal), str(target_dir / f"memories.db{suffix}"))
+            except Exception as e:
+                logger.error(f"memories.db migration failed, falling back to old location: {e}")
+                self.db_path = str(old_db)
+                return  # Don't migrate other files if main DB failed
+
+        # Migrate queue.db independently
+        old_queue = _AGENT_DIR / "queue.db"
+        target_queue = target_dir / "queue.db"
+        if old_queue.exists() and not target_queue.exists():
+            try:
+                try:
+                    tmp_conn = sqlite3.connect(str(old_queue))
+                    tmp_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    tmp_conn.close()
+                except Exception:
+                    pass
+                shutil.copy2(str(old_queue), str(target_queue))
+                logger.info(f"Migrated queue.db -> {target_queue}")
+            except Exception as e:
+                logger.warning(f"queue.db migration failed (non-fatal): {e}")
+
+        # Migrate indexes directory independently
+        old_indexes = _AGENT_DIR / "indexes"
+        target_indexes = target_dir / "indexes"
+        if old_indexes.is_dir() and not target_indexes.exists():
+            try:
+                shutil.copytree(str(old_indexes), str(target_indexes))
+                logger.info(f"Migrated indexes/ -> {target_indexes}")
+            except Exception as e:
+                logger.warning(f"indexes/ migration failed (non-fatal): {e}")
+
+    def _backup_before_migration(self, current_version: str):
+        """Create a backup before schema version changes.
+
+        Keeps last 3 backups, deletes older ones.
+        """
+        db_path = Path(self.db_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"memories.pre_{current_version}_{timestamp}.db"
+        backup_path = db_path.parent / backup_name
+
+        try:
+            shutil.copy2(str(db_path), str(backup_path))
+            logger.info(f"Schema migration backup created: {backup_path}")
+        except Exception as e:
+            logger.warning(f"Failed to create schema backup (continuing anyway): {e}")
+            return
+
+        # Prune old backups — keep only 3 most recent
+        try:
+            backup_pattern = str(db_path.parent / "memories.pre_*.db")
+            backups = sorted(globmod.glob(backup_pattern), key=os.path.getmtime, reverse=True)
+            for old_backup in backups[3:]:
+                os.remove(old_backup)
+                logger.info(f"Pruned old backup: {old_backup}")
+        except Exception as e:
+            logger.warning(f"Backup pruning failed (non-fatal): {e}")
+
     async def connect(self):
         """Establish database connection and initialize connection pool."""
         try:
+            # Ensure target directory exists
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+
+            # Auto-migrate from old code-dir location if needed
+            self._auto_migrate_data_location()
+
             # Initialize connection pool
             self._connection_pool = SQLiteConnectionPool(
                 db_path=self.db_path,
@@ -522,6 +631,28 @@ class DatabaseService:
         """Create necessary tables if they don't exist."""
         cursor = self.conn.cursor()
 
+        # Schema version tracking
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                version TEXT NOT NULL,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        current_version = None
+        try:
+            row = cursor.execute("SELECT version FROM schema_version WHERE id = 1").fetchone()
+            if row:
+                current_version = row[0]
+        except Exception:
+            pass
+
+        # Backup before schema migration (only if DB already has data and version differs)
+        is_fresh_install = current_version is None
+        if not is_fresh_install and current_version != SCHEMA_VERSION:
+            logger.info(f"Schema version changing: {current_version} -> {SCHEMA_VERSION}")
+            self._backup_before_migration(current_version)
+
         # Main memories table with rich context
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS memories (
@@ -636,6 +767,9 @@ class DatabaseService:
                     f"Migration failed for {table}.{column}",
                     original_error=e
                 )
+
+        # Migration: Add chat_id column if it doesn't exist (pre-v3.0 DBs lack it)
+        safe_add_column("memories", "chat_id", "TEXT")
 
         # Migration: Add access_count column if it doesn't exist
         safe_add_column("memories", "access_count", "INTEGER DEFAULT 0")
@@ -1270,6 +1404,32 @@ class DatabaseService:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soul_fragments_session ON soul_fragments(session_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_soul_fragments_project ON soul_fragments(project_path, integrated)")
+
+        # Workflow knowledge - discovered procedures and commands
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS workflow_knowledge (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                steps TEXT DEFAULT '[]',
+                commands TEXT DEFAULT '[]',
+                success_count INTEGER DEFAULT 1,
+                tags TEXT DEFAULT '[]',
+                project_path TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflow_name ON workflow_knowledge(name)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_workflow_project ON workflow_knowledge(project_path)")
+
+        # Update schema version
+        cursor.execute("""
+            INSERT INTO schema_version (id, version, updated_at)
+            VALUES (1, ?, datetime('now'))
+            ON CONFLICT(id) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at
+        """, (SCHEMA_VERSION,))
+        if not is_fresh_install and current_version != SCHEMA_VERSION:
+            logger.info(f"Schema version updated to {SCHEMA_VERSION}")
 
         self.conn.commit()
 
@@ -3532,6 +3692,112 @@ class DatabaseService:
         except Exception as e:
             logger.warning(f"Failed to mark fragments integrated: {e}")
             return 0
+
+    # ============================================================
+    # WORKFLOW KNOWLEDGE METHODS
+    # ============================================================
+
+    async def store_workflow_knowledge(
+        self,
+        name: str,
+        steps: Optional[List[str]] = None,
+        commands: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        project_path: Optional[str] = None,
+    ) -> int:
+        """Store or upsert a workflow. If same name+project exists, increment success_count and merge."""
+        project_path = normalize_path(project_path) if project_path else None
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                # Check for existing workflow with same name (and project)
+                if project_path:
+                    cursor.execute(
+                        "SELECT id, steps, commands, success_count, tags FROM workflow_knowledge WHERE name = ? AND project_path = ?",
+                        (name, project_path)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, steps, commands, success_count, tags FROM workflow_knowledge WHERE name = ? AND project_path IS NULL",
+                        (name,)
+                    )
+                row = cursor.fetchone()
+
+                if row:
+                    # Merge: combine steps/commands, increment success_count
+                    existing_steps = json.loads(row["steps"]) if row["steps"] else []
+                    existing_cmds = json.loads(row["commands"]) if row["commands"] else []
+                    existing_tags = json.loads(row["tags"]) if row["tags"] else []
+
+                    merged_steps = steps if steps else existing_steps
+                    merged_cmds = list(dict.fromkeys(existing_cmds + (commands or [])))
+                    merged_tags = list(set(existing_tags + (tags or [])))
+
+                    cursor.execute(
+                        """UPDATE workflow_knowledge
+                           SET steps = ?, commands = ?, tags = ?,
+                               success_count = success_count + 1,
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE id = ?""",
+                        (json.dumps(merged_steps), json.dumps(merged_cmds),
+                         json.dumps(merged_tags), row["id"])
+                    )
+                    conn.commit()
+                    return row["id"]
+                else:
+                    cursor.execute(
+                        """INSERT INTO workflow_knowledge (name, steps, commands, tags, project_path)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (name, json.dumps(steps or []), json.dumps(commands or []),
+                         json.dumps(tags or []), project_path)
+                    )
+                    conn.commit()
+                    return cursor.lastrowid
+        except Exception as e:
+            logger.error(f"Failed to store workflow knowledge: {e}")
+            return -1
+
+    async def get_workflow_knowledge(
+        self,
+        project_path: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Get workflow knowledge, optionally filtered by project. Ordered by success_count desc."""
+        project_path = normalize_path(project_path) if project_path else None
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                if project_path:
+                    cursor.execute(
+                        """SELECT * FROM workflow_knowledge
+                           WHERE project_path = ? OR project_path IS NULL
+                           ORDER BY success_count DESC
+                           LIMIT ?""",
+                        (project_path, limit)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT * FROM workflow_knowledge ORDER BY success_count DESC LIMIT ?",
+                        (limit,)
+                    )
+                rows = cursor.fetchall()
+                return [
+                    {
+                        "id": r["id"],
+                        "name": r["name"],
+                        "steps": json.loads(r["steps"]) if r["steps"] else [],
+                        "commands": json.loads(r["commands"]) if r["commands"] else [],
+                        "success_count": r["success_count"],
+                        "tags": json.loads(r["tags"]) if r["tags"] else [],
+                        "project_path": r["project_path"],
+                        "created_at": r["created_at"],
+                        "updated_at": r["updated_at"],
+                    }
+                    for r in rows
+                ]
+        except Exception as e:
+            logger.error(f"Failed to get workflow knowledge: {e}")
+            return []
 
     # ============================================================
     # GENERIC QUERY METHOD

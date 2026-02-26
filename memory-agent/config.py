@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 AGENT_DIR = Path(__file__).parent.resolve()
 load_dotenv(AGENT_DIR / ".env")
 
+# User data directory — safe from code updates (zip, git pull, npm update)
+USER_DATA_DIR = Path(os.getenv("USER_DATA_DIR", str(Path.home() / ".claude-memory")))
+
 
 class Config:
     """Configuration singleton with environment variable loading."""
@@ -30,11 +33,15 @@ class Config:
         self.AGENT_DIR = AGENT_DIR
         self.DATABASE_PATH = Path(os.getenv(
             "DATABASE_PATH",
-            str(AGENT_DIR / "memories.db")
+            str(USER_DATA_DIR / "memories.db")
         ))
         self.INDEX_DIR = Path(os.getenv(
             "INDEX_DIR",
-            str(AGENT_DIR / "indexes")
+            str(USER_DATA_DIR / "indexes")
+        ))
+        self.QUEUE_DB_PATH = Path(os.getenv(
+            "QUEUE_DB_PATH",
+            str(USER_DATA_DIR / "queue.db")
         ))
         self.LOG_FILE = AGENT_DIR / "memory-agent.log"
         self.LOCK_FILE = AGENT_DIR / "memory-agent.lock"
@@ -207,3 +214,4 @@ OLLAMA_HOST = config.OLLAMA_HOST
 EMBEDDING_PROVIDER = config.EMBEDDING_PROVIDER
 EMBEDDING_MODEL = config.EMBEDDING_MODEL
 DATABASE_PATH = config.DATABASE_PATH
+QUEUE_DB_PATH = config.QUEUE_DB_PATH

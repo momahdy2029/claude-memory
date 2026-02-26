@@ -178,7 +178,7 @@ class SentenceTransformerProvider(EmbeddingProvider):
             )
 
         self.model_name = model
-        self._model = SentenceTransformer(model, trust_remote_code=False)
+        self._model = SentenceTransformer(model, trust_remote_code=True)
         self._dimension = self._model.get_sentence_embedding_dimension()
 
     def embed(self, text: str) -> List[float]:

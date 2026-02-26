@@ -1,16 +1,18 @@
 """Slim MCP proxy for Claude Memory.
 
-Thin adapter that exposes 3 unified tools over stdio JSON-RPC,
+Thin adapter that exposes 4 unified tools over stdio JSON-RPC,
 forwarding all work to the HTTP backend (main.py on port 8102).
 
 NO embedding model loaded. NO database connection. Just HTTP calls.
 
 Tools:
-    memory_ask   - Unified search (replaces memory_search, memory_search_patterns,
-                   memory_context, memory_get_project, memory_active_sessions,
-                   memory_session_catchup)
-    memory_store - Unified store (replaces memory_store, memory_store_pattern,
-                   memory_store_project)
+    memory_ask    - Unified search (replaces memory_search, memory_search_patterns,
+                    memory_context, memory_get_project, memory_active_sessions,
+                    memory_session_catchup)
+    memory_store  - Unified store (replaces memory_store, memory_store_pattern,
+                    memory_store_project)
+    memory_resume - Complete catch-up package for session recovery after context
+                    clear (goal, decisions, entities, workflows, memories, soul)
     memory_status - Quick stats + project info (replaces memory_stats, memory_dashboard)
 
 Usage:
@@ -266,6 +268,85 @@ async def memory_store(
         "success": success,
     })
     return json.dumps(result or {"error": "Memory agent unavailable"}, default=str)
+
+
+@mcp_server.tool()
+async def memory_resume(
+    project_path: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    """Resume after context clear — get complete catch-up package in one call.
+
+    Call this when starting a fresh session or after context was compacted.
+    Returns: goal, decisions, entity registry, learned workflows,
+    recent memories, and soul brief — everything needed to continue working.
+
+    Args:
+        project_path: Project path to resume context for
+        session_id: Optional specific session ID (uses latest for project if omitted)
+    """
+    result = await _rest_post("/api/session/resume", {
+        "session_id": session_id or "",
+        "project_path": project_path or "",
+    })
+
+    if not result:
+        return json.dumps({
+            "success": False,
+            "error": "Memory agent unavailable - is main.py running on port 8102?",
+        })
+
+    # Format for readability
+    output: Dict[str, Any] = {"success": True}
+
+    # Session state
+    state = result.get("session_state")
+    if state and isinstance(state, dict):
+        output["goal"] = state.get("current_goal", "")
+        output["decisions"] = state.get("decisions_summary", "")
+        output["entity_registry"] = state.get("entity_registry", {})
+        output["pending"] = state.get("pending_questions", [])
+
+    # Checkpoint
+    cp = result.get("checkpoint")
+    if cp and isinstance(cp, dict):
+        output["checkpoint"] = {
+            "summary": cp.get("summary", ""),
+            "key_facts": cp.get("key_facts", []),
+            "decisions": cp.get("decisions", []),
+        }
+
+    # Workflows
+    workflows = result.get("workflows")
+    if workflows and isinstance(workflows, list):
+        output["workflows"] = [
+            {
+                "name": wf.get("name", ""),
+                "commands": wf.get("commands", []),
+                "steps": wf.get("steps", []),
+                "success_count": wf.get("success_count", 0),
+            }
+            for wf in workflows[:10]
+        ]
+
+    # Recent memories (compact)
+    memories = result.get("memories")
+    if memories and isinstance(memories, list):
+        output["recent_memories"] = [
+            {
+                "content": m.get("content", "")[:200],
+                "type": m.get("type", ""),
+                "importance": m.get("importance", 5),
+            }
+            for m in memories[:10]
+        ]
+
+    # Soul brief
+    soul = result.get("soul_brief")
+    if soul:
+        output["soul_brief"] = soul
+
+    return json.dumps(output, default=str)
 
 
 @mcp_server.tool()

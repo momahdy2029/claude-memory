@@ -372,7 +372,7 @@ def create_env_file(config: Dict[str, str], force: bool = False) -> bool:
         f"OLLAMA_HOST={config['OLLAMA_HOST']}",
         "",
         "# Database Configuration",
-        f"DATABASE_PATH={AGENT_DIR / 'memories.db'}",
+        f"DATABASE_PATH={Path.home() / '.claude-memory' / 'memories.db'}",
         f"USE_VECTOR_INDEX={config['USE_VECTOR_INDEX']}",
         f"DB_POOL_SIZE={config['DB_POOL_SIZE']}",
         f"DB_TIMEOUT={config['DB_TIMEOUT']}",
@@ -1019,7 +1019,7 @@ def main():
     # Step 4: Create .env file
     print_step(4, total_steps, "Creating configuration file...")
     if not args.skip_env:
-        if not create_env_file(config, force=args.auto):
+        if not create_env_file(config, force=False):
             return 1
     else:
         print_success("Skipped .env creation (--skip-env)")

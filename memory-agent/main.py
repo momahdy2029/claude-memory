@@ -5930,6 +5930,395 @@ async def api_grounding_context(request: Request):
     }
 
 
+# ============= Session Recovery System (v3.2.0) =============
+
+
+@app.post("/api/workflow/capture")
+async def api_workflow_capture(request: Request):
+    """Capture or upsert a workflow (name + steps + commands).
+
+    If same workflow name exists for this project, increments success_count and merges commands.
+    """
+    try:
+        body = await request.json()
+        name = body.get("name", "").strip()
+        if not name:
+            return {"success": False, "error": "name required"}
+
+        workflow_id = await db.store_workflow_knowledge(
+            name=name,
+            steps=body.get("steps"),
+            commands=body.get("commands"),
+            tags=body.get("tags"),
+            project_path=body.get("project_path") or None,
+        )
+        return {"success": workflow_id > 0, "workflow_id": workflow_id}
+    except Exception as e:
+        logger.error(f"Workflow capture failed: {e}")
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/api/session/brain-dump")
+async def api_session_brain_dump(request: Request):
+    """Aggregate full session state for writing to MEMORY.md before compaction.
+
+    Runs parallel queries: session_state, latest checkpoint, recent memories,
+    workflow_knowledge, and soul brief.
+
+    Body:
+        session_id: str
+        project_path: str
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    session_id = body.get("session_id", "")
+    project_path = body.get("project_path", "")
+
+    result = {
+        "success": True,
+        "timestamp": datetime.now().isoformat(),
+        "session_id": session_id,
+    }
+
+    tasks_dict = {}
+
+    # Session state
+    if session_id:
+        async def _get_state():
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM session_state WHERE session_id = ?",
+                    (session_id,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "current_goal": row["current_goal"],
+                        "entity_registry": json.loads(row["entity_registry"]) if row["entity_registry"] else {},
+                        "decisions_summary": row["decisions_summary"],
+                        "pending_questions": json.loads(row["pending_questions"]) if row["pending_questions"] else [],
+                    }
+                return None
+            except Exception:
+                return None
+        tasks_dict["state"] = _get_state()
+
+    # Latest checkpoint
+    if session_id:
+        tasks_dict["checkpoint"] = db.get_latest_checkpoint(session_id)
+
+    # Recent memories (last 10 high-importance)
+    if project_path:
+        async def _get_recent_memories():
+            try:
+                cursor = db.conn.cursor()
+                cursor.execute(
+                    """SELECT content, type, importance, tags, created_at
+                       FROM memories
+                       WHERE project_path = ? AND importance >= 6
+                       ORDER BY created_at DESC LIMIT 10""",
+                    (project_path,)
+                )
+                return [dict(r) for r in cursor.fetchall()]
+            except Exception:
+                return []
+        tasks_dict["memories"] = _get_recent_memories()
+
+    # Workflow knowledge
+    tasks_dict["workflows"] = db.get_workflow_knowledge(
+        project_path=project_path, limit=10
+    )
+
+    # Soul brief
+    if project_path:
+        async def _get_soul():
+            try:
+                return await soul_service.generate_soul_brief(project_path)
+            except Exception:
+                return ""
+        tasks_dict["soul"] = _get_soul()
+
+    # Run all in parallel
+    keys = list(tasks_dict.keys())
+    gathered = await asyncio.gather(
+        *[tasks_dict[k] for k in keys],
+        return_exceptions=True,
+    )
+
+    for k, v in zip(keys, gathered):
+        if isinstance(v, Exception):
+            result[k] = None
+        else:
+            result[k] = v
+
+    return result
+
+
+@app.post("/api/session/resume")
+async def api_session_resume(request: Request):
+    """Complete catch-up package for resuming a session after context clear.
+
+    Returns: goal, decisions, entity registry, learned workflows,
+    recent memories, and soul brief — all in one call.
+
+    Body:
+        session_id: str (optional — uses latest for project if missing)
+        project_path: str
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    session_id = body.get("session_id", "")
+    project_path = body.get("project_path", "")
+
+    result = {"success": True}
+
+    tasks_dict = {}
+
+    # Session state — try by ID first, fall back to latest for project
+    async def _get_state():
+        try:
+            if session_id:
+                cursor = db.conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM session_state WHERE session_id = ?",
+                    (session_id,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "session_id": row["session_id"],
+                        "current_goal": row["current_goal"],
+                        "entity_registry": json.loads(row["entity_registry"]) if row["entity_registry"] else {},
+                        "decisions_summary": row["decisions_summary"],
+                        "pending_questions": json.loads(row["pending_questions"]) if row["pending_questions"] else [],
+                    }
+            if project_path:
+                return await db.get_latest_session_for_project(project_path)
+            return None
+        except Exception:
+            return None
+    tasks_dict["session_state"] = _get_state()
+
+    # Latest checkpoint
+    async def _get_checkpoint():
+        try:
+            if session_id:
+                return await db.get_latest_checkpoint(session_id)
+            if project_path:
+                state = await db.get_latest_session_for_project(project_path)
+                if state:
+                    return await db.get_latest_checkpoint(state["session_id"])
+            return None
+        except Exception:
+            return None
+    tasks_dict["checkpoint"] = _get_checkpoint()
+
+    # Workflow knowledge
+    tasks_dict["workflows"] = db.get_workflow_knowledge(
+        project_path=project_path, limit=10
+    )
+
+    # Recent high-importance memories
+    async def _get_memories():
+        try:
+            cursor = db.conn.cursor()
+            if project_path:
+                cursor.execute(
+                    """SELECT id, content, type, importance, tags, created_at
+                       FROM memories
+                       WHERE project_path = ? AND importance >= 5
+                       ORDER BY importance DESC, created_at DESC
+                       LIMIT 15""",
+                    (project_path,)
+                )
+            else:
+                cursor.execute(
+                    """SELECT id, content, type, importance, tags, created_at
+                       FROM memories
+                       WHERE importance >= 6
+                       ORDER BY importance DESC, created_at DESC
+                       LIMIT 10"""
+                )
+            return [dict(r) for r in cursor.fetchall()]
+        except Exception:
+            return []
+    tasks_dict["memories"] = _get_memories()
+
+    # Soul brief
+    async def _get_soul():
+        try:
+            if project_path:
+                return await soul_service.generate_soul_brief(project_path)
+            return ""
+        except Exception:
+            return ""
+    tasks_dict["soul_brief"] = _get_soul()
+
+    # Run all in parallel
+    keys = list(tasks_dict.keys())
+    gathered = await asyncio.gather(
+        *[tasks_dict[k] for k in keys],
+        return_exceptions=True,
+    )
+
+    for k, v in zip(keys, gathered):
+        result[k] = v if not isinstance(v, Exception) else None
+
+    return result
+
+
+@app.post("/api/grounding-context/rich")
+async def api_grounding_context_rich(request: Request):
+    """Rich multi-section grounding context for fresh sessions (~500-800 tokens).
+
+    Used by grounding hook when detecting a fresh/resumed session.
+    Includes soul brief, checkpoint summary, workflows, entities, pending items.
+
+    Body:
+        session_id: str
+        project_path: str
+
+    Returns:
+        {"success": true, "context": "[MEM:RESUME] ...", "token_estimate": N}
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    session_id = body.get("session_id", "")
+    project_path = body.get("project_path", "")
+
+    tasks_dict = {}
+
+    # Session state (by ID or latest for project)
+    async def _get_state():
+        try:
+            if session_id:
+                cursor = db.conn.cursor()
+                cursor.execute(
+                    "SELECT * FROM session_state WHERE session_id = ?",
+                    (session_id,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "current_goal": row["current_goal"],
+                        "entity_registry": json.loads(row["entity_registry"]) if row["entity_registry"] else {},
+                        "decisions_summary": row["decisions_summary"],
+                        "pending_questions": json.loads(row["pending_questions"]) if row["pending_questions"] else [],
+                    }
+            if project_path:
+                return await db.get_latest_session_for_project(project_path)
+            return None
+        except Exception:
+            return None
+    tasks_dict["state"] = _get_state()
+
+    # Latest checkpoint
+    async def _get_checkpoint():
+        try:
+            if session_id:
+                return await db.get_latest_checkpoint(session_id)
+            if project_path:
+                st = await db.get_latest_session_for_project(project_path)
+                if st:
+                    return await db.get_latest_checkpoint(st["session_id"])
+            return None
+        except Exception:
+            return None
+    tasks_dict["checkpoint"] = _get_checkpoint()
+
+    # Workflow knowledge (top 5)
+    tasks_dict["workflows"] = db.get_workflow_knowledge(
+        project_path=project_path, limit=5
+    )
+
+    # Soul brief
+    async def _get_soul():
+        try:
+            if project_path:
+                return await soul_service.generate_soul_brief(project_path)
+            return ""
+        except Exception:
+            return ""
+    tasks_dict["soul"] = _get_soul()
+
+    # Run all in parallel
+    keys = list(tasks_dict.keys())
+    gathered = await asyncio.gather(
+        *[tasks_dict[k] for k in keys],
+        return_exceptions=True,
+    )
+    results = {}
+    for k, v in zip(keys, gathered):
+        results[k] = v if not isinstance(v, Exception) else None
+
+    # -- Build rich context (budget ~550 tokens / 2200 chars) --
+    sections = []
+
+    # Soul brief (cap 100 tokens)
+    soul = results.get("soul") or ""
+    if soul:
+        sections.append(f"## Soul\n{soul[:400]}")
+
+    # Goal & decisions
+    state = results.get("state")
+    if state and isinstance(state, dict):
+        goal = state.get("current_goal", "")
+        if goal:
+            sections.append(f"## Goal\n{goal[:150]}")
+        decisions = state.get("decisions_summary", "")
+        if decisions:
+            sections.append(f"## Decisions\n{decisions[:300]}")
+        pending = state.get("pending_questions") or state.get("pending_items") or []
+        if pending:
+            items = [f"- {p[:60]}" for p in pending[:5]]
+            sections.append(f"## Pending\n" + "\n".join(items))
+        entities = state.get("entity_registry") or {}
+        if entities:
+            ent_lines = [f"- {k}: {v[:40]}" for k, v in list(entities.items())[:8]]
+            sections.append(f"## Entities\n" + "\n".join(ent_lines))
+
+    # Checkpoint summary
+    cp = results.get("checkpoint")
+    if cp and isinstance(cp, dict):
+        summary = cp.get("summary", "")
+        if summary:
+            sections.append(f"## Last Checkpoint\n{summary[:200]}")
+
+    # Workflows
+    workflows = results.get("workflows") or []
+    if workflows:
+        wf_lines = []
+        for wf in workflows[:5]:
+            cmds = wf.get("commands", [])
+            cmd_str = " -> ".join(cmds[:3]) if cmds else ""
+            wf_lines.append(f"- **{wf['name']}**: {cmd_str[:80]}")
+        sections.append(f"## Workflows\n" + "\n".join(wf_lines))
+
+    if sections:
+        context = "[MEM:RESUME]\n" + "\n\n".join(sections)
+        # Hard cap at ~2200 chars to stay within token budget
+        if len(context) > 2200:
+            context = context[:2200] + "\n..."
+    else:
+        context = ""
+
+    return {
+        "success": True,
+        "context": context,
+        "token_estimate": len(context.split()),
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(

@@ -58,7 +58,9 @@ function runSync(cmd, cwd) {
  */
 function buildEnvContent(config, agentDir) {
     const timestamp = new Date().toISOString();
-    const dbPath = config.dbPath || path.join(agentDir, 'memories.db').replace(/\\/g, '/');
+    const homedir = require('os').homedir();
+    const defaultDbPath = path.join(homedir, '.claude-memory', 'memories.db').replace(/\\/g, '/');
+    const dbPath = config.dbPath || defaultDbPath;
     const memoryUrl = 'http://' + (config.host === '0.0.0.0' ? 'localhost' : config.host) + ':' + config.port;
 
     const lines = [

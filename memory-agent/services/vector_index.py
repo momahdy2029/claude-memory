@@ -23,7 +23,11 @@ except ImportError:
     faiss = None
 
 # Index configuration
-INDEX_DIR = os.getenv("INDEX_DIR", str(Path(__file__).parent.parent / "indexes"))
+try:
+    from config import USER_DATA_DIR as _DATA_DIR
+except ImportError:
+    _DATA_DIR = Path.home() / ".claude-memory"
+INDEX_DIR = os.getenv("INDEX_DIR", str(_DATA_DIR / "indexes"))
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 INDEX_TYPE = os.getenv("INDEX_TYPE", "flat")  # flat, ivf, hnsw
 
