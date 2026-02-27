@@ -155,19 +155,40 @@ def update_session_meta(session_id: str, project_path: str):
 
 
 # ---------------------------------------------------------------------------
-# Self-reflection hint (appended to every grounding context)
+# Self-reflection hint (appended every N prompts to avoid noise fatigue)
 # ---------------------------------------------------------------------------
 
+LEARNING_HINT_INTERVAL = 3  # Show hint every N prompts (1st, 4th, 7th, ...)
+
 LEARNING_HINT = (
-    "\nIf you discovered something new/unique this response "
-    "(a non-obvious fix, a codebase quirk, a useful workflow), "
-    "append a hidden tag at the very end: <!-- LEARNED: one-sentence description -->"
+    "\n[IMPORTANT] After completing this response, tag any non-obvious discovery "
+    "(a surprising fix, codebase quirk, reusable workflow, or gotcha) by appending "
+    "exactly: <!-- LEARNED: one-sentence description -->  "
+    "This is silently captured — the user won't see it. Skip if nothing novel."
 )
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+def _get_grounding_count(session_id: str, project_path: str) -> int:
+    """Read current grounding_count from session meta (0 if unknown)."""
+    try:
+        if SESSION_META_FILE.exists():
+            meta = json.loads(SESSION_META_FILE.read_text(encoding="utf-8"))
+            entry = meta.get(project_path, {})
+            if entry.get("last_grounded_session") == session_id:
+                return entry.get("grounding_count", 0)
+    except (json.JSONDecodeError, OSError):
+        pass
+    return 0
+
+
+def _should_show_hint(grounding_count: int) -> bool:
+    """Show learning hint on 1st prompt and every LEARNING_HINT_INTERVAL after."""
+    return grounding_count % LEARNING_HINT_INTERVAL == 0
+
 
 def main():
     payload = read_stdin_payload()
@@ -221,8 +242,13 @@ def main():
     # Detect fresh vs continuing session
     fresh = is_fresh_session(session_id, project_path)
 
+    # Determine if learning hint should be shown this prompt
+    count = _get_grounding_count(session_id, project_path)
+    hint = LEARNING_HINT if _should_show_hint(count) else ""
+
     if fresh:
         # Fresh session: use rich grounding context (~500-800 tokens)
+        # Always include hint on fresh sessions
         try:
             data = _http_post(
                 f"{MEMORY_AGENT_URL}/api/grounding-context/rich",
@@ -251,7 +277,7 @@ def main():
         if data:
             context = data.get("context", "")
             if context:
-                print(context + LEARNING_HINT)
+                print(context + hint)
     except Exception as e:
         logger.debug(f"Grounding context call failed: {e}")
 
