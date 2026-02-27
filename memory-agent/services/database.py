@@ -1832,7 +1832,12 @@ class DatabaseService:
 
         # Add to FAISS index if available (outside transaction - index is in-memory)
         if self._memories_index and embedding:
-            self._memories_index.add(memory_id, embedding)
+            try:
+                self._memories_index.add(memory_id, embedding)
+            except Exception as e:
+                # FAISS dimension mismatch or other index error — memory is still
+                # stored in SQLite, just won't be in the vector index until rebuild.
+                logger.warning(f"FAISS index add failed for memory {memory_id}: {e}")
 
         return memory_id
 

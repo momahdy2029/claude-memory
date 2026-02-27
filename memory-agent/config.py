@@ -63,6 +63,12 @@ class Config:
         self.OLLAMA_HEALTH_TIMEOUT = float(os.getenv("OLLAMA_HEALTH_TIMEOUT", "2.0"))
         self.OLLAMA_HEALTH_CACHE_TTL = float(os.getenv("OLLAMA_HEALTH_CACHE_TTL", "30.0"))
 
+        # OpenClaw (LLM analysis via OpenAI-compatible API)
+        self.OPENCLAW_URL = os.getenv("OPENCLAW_URL", "")  # e.g. http://192.168.1.x:3000
+        self.OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "")
+        self.OPENCLAW_MODEL = os.getenv("OPENCLAW_MODEL", "openclaw")  # model field for /v1/chat/completions
+        self.OPENCLAW_TIMEOUT = float(os.getenv("OPENCLAW_TIMEOUT", "30.0"))
+
         # Database
         self.USE_VECTOR_INDEX = os.getenv("USE_VECTOR_INDEX", "true").lower() == "true"
         self.DB_POOL_SIZE = int(os.getenv("DB_POOL_SIZE", "5"))

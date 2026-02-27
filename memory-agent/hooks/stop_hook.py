@@ -584,6 +584,43 @@ def _extract_and_capture_workflows(text: str, project_path: str):
 
 
 # ---------------------------------------------------------------------------
+# LLM-judged learning extraction (fire-and-forget via memory agent)
+# ---------------------------------------------------------------------------
+
+def _fire_llm_extraction(response_text: str, session_id: str, project_path: str):
+    """Fire-and-forget POST to /api/extract-learnings.
+
+    The memory agent handles the slow OpenClaw call asynchronously.
+    This function returns immediately (non-blocking, ~50ms timeout).
+    """
+    import urllib.request
+    import urllib.error
+
+    # Skip very short responses (not worth analyzing)
+    if len(response_text) < 200:
+        return
+
+    payload = json.dumps({
+        "response_text": response_text[:4000],  # Truncate for transit
+        "session_id": session_id,
+        "project_path": project_path,
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            f"{MEMORY_AGENT_URL}/api/extract-learnings",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        # Very short timeout — we just want to hand off the request.
+        # The server processes it asynchronously.
+        urllib.request.urlopen(req, timeout=0.5)
+    except Exception:
+        pass  # Fire-and-forget — never block the hook
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -652,6 +689,10 @@ def main():
             _capture_soul_fragments(
                 response_text, session_id, project_path
             )
+
+        # --- LLM-judged learning extraction (fire-and-forget to memory agent) ---
+        # This calls OpenClaw asynchronously via the server; does NOT block the hook
+        _fire_llm_extraction(response_text, session_id, project_path)
 
         elapsed_total = round(time.time() - start, 3)
         print(

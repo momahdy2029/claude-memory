@@ -6319,6 +6319,156 @@ async def api_grounding_context_rich(request: Request):
     }
 
 
+# ---------------------------------------------------------------------------
+#  /api/extract-learnings  —  LLM-judged learning extraction via OpenClaw
+# ---------------------------------------------------------------------------
+
+_EXTRACT_LEARNINGS_PROMPT = """You are a learning extractor. Analyze this AI assistant response and extract ONLY non-obvious discoveries worth remembering for future sessions.
+
+RESPONSE:
+---
+{response_text}
+---
+
+Extract items that are:
+- Surprising fixes or workarounds (not standard documentation)
+- Codebase-specific quirks or gotchas
+- Reusable workflows or procedures
+- Root causes of bugs that were hard to find
+- Architecture decisions with reasoning
+
+DO NOT extract:
+- Standard code changes (added a function, fixed a typo)
+- Obvious things (installed a package, ran a command)
+- Conversational filler
+
+Return JSON ONLY:
+{{"learnings": [{{"content": "one clear sentence", "importance": 6-9, "tags": ["tag1"]}}]}}
+
+If nothing worth remembering, return: {{"learnings": []}}
+Max 3 items. Be selective."""
+
+
+@app.post("/api/extract-learnings")
+async def extract_learnings(request: Request):
+    """LLM-judged extraction of learnings from a Claude response.
+
+    Calls OpenClaw synchronously (via threadpool) and stores results.
+    The stop_hook fires this with a short timeout (fire-and-forget),
+    but the server continues processing even after the client disconnects.
+    """
+    body = await request.json()
+    response_text = body.get("response_text", "")
+    project_path = body.get("project_path", "")
+    session_id = body.get("session_id", "")
+
+    if not response_text or len(response_text) < 80:
+        return {"success": True, "stored": 0, "reason": "response too short"}
+
+    openclaw_url = _cfg.OPENCLAW_URL
+    if not openclaw_url:
+        return {"success": False, "error": "OPENCLAW_URL not configured"}
+
+    import urllib.request
+    import urllib.error
+
+    openclaw_token = _cfg.OPENCLAW_TOKEN
+    openclaw_model = _cfg.OPENCLAW_MODEL
+    openclaw_timeout = _cfg.OPENCLAW_TIMEOUT
+
+    # Truncate to avoid huge payloads
+    truncated = response_text[:4000]
+    prompt = _EXTRACT_LEARNINGS_PROMPT.format(response_text=truncated)
+
+    # Call OpenClaw /v1/chat/completions (blocking HTTP in threadpool)
+    payload_bytes = json.dumps({
+        "model": openclaw_model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 500,
+    }).encode("utf-8")
+
+    headers = {"Content-Type": "application/json"}
+    if openclaw_token:
+        headers["Authorization"] = f"Bearer {openclaw_token}"
+
+    def _call_openclaw():
+        req = urllib.request.Request(
+            f"{openclaw_url.rstrip('/')}/v1/chat/completions",
+            data=payload_bytes,
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=openclaw_timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        loop = asyncio.get_running_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _call_openclaw),
+            timeout=openclaw_timeout + 5,
+        )
+    except Exception as e:
+        logger.warning(f"[extract-learnings] OpenClaw call failed: {e}")
+        return {"success": False, "error": str(e)}
+
+    # Parse OpenAI-compatible response
+    try:
+        content = result["choices"][0]["message"]["content"]
+        json_start = content.find("{")
+        json_end = content.rfind("}") + 1
+        if json_start < 0 or json_end <= json_start:
+            return {"success": True, "stored": 0, "reason": "no JSON in LLM response"}
+        parsed = json.loads(content[json_start:json_end])
+        learnings = parsed.get("learnings", [])
+    except (KeyError, IndexError, json.JSONDecodeError) as e:
+        logger.warning(f"[extract-learnings] Parse error: {e}")
+        return {"success": False, "error": f"parse: {e}"}
+
+    if not learnings:
+        return {"success": True, "stored": 0, "reason": "nothing worth remembering"}
+
+    # Store each learning
+    stored = 0
+    errors = []
+    for item in learnings[:3]:
+        content_text = item.get("content", "")
+        if not content_text or len(content_text) < 10:
+            continue
+        importance = max(5, min(9, item.get("importance", 7)))
+        tags = item.get("tags", [])
+        tags = [t for t in tags if isinstance(t, str)][:5]
+        tags.extend(["llm-extracted", "openclaw", "auto-learning"])
+
+        try:
+            # Generate embedding vector (required by db.store_memory)
+            embedding = await embeddings.generate_embedding(
+                f"[Auto-learned] {content_text}"
+            )
+            if not embedding:
+                errors.append(f"embedding failed for: {content_text[:40]}")
+                continue
+
+            memory_id = await db.store_memory(
+                content=f"[Auto-learned] {content_text}",
+                memory_type="decision",
+                embedding=embedding,
+                importance=importance,
+                session_id=session_id,
+                project_path=project_path,
+                tags=tags,
+            )
+            stored += 1
+            logger.info(f"[extract-learnings] Stored memory id={memory_id}: {content_text[:80]}")
+        except Exception as e:
+            errors.append(str(e))
+            logger.warning(f"[extract-learnings] Store failed: {e}")
+
+    if stored:
+        logger.info(f"[extract-learnings] Stored {stored} learnings via OpenClaw")
+    return {"success": True, "stored": stored}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
